@@ -1,0 +1,3404 @@
+### 20160506 custom R scripts Ho et al
+
+
+######################################################################################
+
+### 20140811 human set including Roth (iMN data set)
+
+### RMA normalize all affy arrays, run pvac, annotate gene to probe, collapse to gene level by taking max probe value.
+
+### density plots for PVAC_genemax
+c=read.table("PVAC_genemaxULorder.txt", h=T, sep="\t")
+dim(c)
+d=log2(c[,2:44])
+for(i in 1:ncol(d))
+  if(i==1) plot(density(d[,i]),
+                col=1,
+                ylim=c(0,0.25),
+                #xlim=c(-1,15),
+                main="PVAC_genemaxULorder with Roth") else lines(density(d[,i]), col=1)
+
+### unlog PVAC_genemax, QN. quantile normalize values in linear scale
+
+library(preprocessCore)
+df=read.table("PVAC_genemaxULorder.txt",h=T,sep="\t")
+summary(df)
+length(df[1,])
+m=as.matrix(df[2:44])
+write.table(m,file="PVAC_genemaxUL_matrix.txt",sep="\t")
+c=normalize.quantiles(m)
+write.table(c,file="PVAC_gmaxUL_NQ.txt", row.names=F, quote=F, sep="\t")
+
+
+
+c=read.table("PVAC_gmaxUL_NQ.txt", h=T, sep="\t")
+d=log2(c[,2:44])
+for(i in 1:ncol(d))
+  if(i==1) plot(density(d[,i]),
+                col=1,
+                #ylim=c(0,0.25),
+                #xlim=c(-1,15),
+                main="PVAC_genemaxUL_NQL") else lines(density(d[,i]), col=1)
+
+write.table(d,file="PVAC_genemaxUL_NQL.txt",sep="\t")
+
+
+
+
+
+
+######################################################################################
+
+### 20150119 human WGCNA for iMN data set
+
+# adapted from tutorials: https://labs.genetics.ucla.edu/horvath/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/index.html
+
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("impute")
+#install.packages("WGCNA")
+
+library(WGCNA)
+getwd()
+options(stringsAsFactors = FALSE)
+
+a=read.table("20150119_PVAC_gmaxUL_NQL.txt", h=T, sep="\t")
+dim(a)
+names(a)
+
+### define expression data, gene names and array names
+datExpr0 = as.data.frame(t(a[, -c(1)]))
+names(datExpr0) = a$Gene
+rownames(datExpr0) = names(a)[-c(1)]
+
+### check for missing values and bad arrays
+gsg = goodSamplesGenes(datExpr0, verbose = 3)
+gsg$allOK
+
+### to remove offending genes and samples from data
+if (!gsg$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg$goodGenes)>0)
+    printFlush(paste("Removing genes:", paste(names(datExpr0)[!gsg$goodGenes], collapse = ", ")));
+  if (sum(!gsg$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr0)[!gsg$goodSamples], collapse = ", ")));
+  # Remove the offending genes and samples from the data:
+  datExpr0 = datExpr0[gsg$goodSamples, gsg$goodGenes]
+}
+
+### cluster samples with hclust
+sampleTree = hclust(dist(datExpr0), method = "average")
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(12,9)
+#pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6)
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+
+### determine height to cut out samples.  setting it at 200 in this instance keeps all samples.
+abline(h = 200, col = "red")
+# Determine cluster under the line
+clust = cutreeStatic(sampleTree, cutHeight = 200, minSize = 10)
+table(clust)
+# clust 1 contains the samples we want to keep.
+keepSamples = (clust==1)
+datExpr = datExpr0[keepSamples, ]
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+# The variable datExpr now contains the expression data ready for network analysis.
+
+### now read in trait data: I plotted cell type, external traits, and PC1-3 for each array.
+traitData = read.table("20150119_PVAC_gmaxUL_NQL_PCAcoordAGE.txt", h=T, sep="\t")
+dim(traitData)
+names(traitData)
+
+# remove any columns that hold information we do not need.  in this instance, i keep all
+allTraits = traitData
+allTraits = allTraits[,c(1:44)]
+dim(allTraits)
+names(allTraits)
+
+# Form a data frame analogous to expression data that will hold the clinical traits.
+allSamples = rownames(datExpr);
+traitRows = match(allSamples, allTraits$EIGVALUE);
+datTraits = allTraits[traitRows, -1];
+rownames(datTraits) = allTraits[traitRows, 1];
+collectGarbage()
+
+# Re-cluster samples
+sampleTree2 = hclust(dist(datExpr), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits, signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits),
+                    main = "20150119 Sample dendrogram and trait heatmap")
+
+save(datExpr, datTraits, file = "20150119_data_Input.RData")
+
+
+
+
+### automatic network construction and module detection
+
+# Load the data saved in the first part
+lnames = load(file = "20150119_data_Input.RData");
+#The variable lnames contains the names of loaded variables.
+lnames
+
+# Choose a set of soft-thresholding powers
+### Zhang and Horvath 2005 recommend choosing sft power that gives R^2 >= 0.8
+
+powers = c(19:30)
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.80,col="red")
+
+### 20150119 export model fit signed R^2
+
+signedR2 = sft$fitIndices$SFT.R.sq
+write.table(signedR2, file="20150119_signedR2.txt", row.names=F, quote=F, sep="\t")
+
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+meanK = sft$fitIndices$mean.k.
+write.table(meanK, file="20150119_meanK.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+### looks like 30 as a power maximizes the fit to scale free topology
+### increase maxBlockSize parameter to 10606 to fit all 10605 genes into one block
+### deepsplit = 0 to increase specificity
+### deepsplit = 3 to increase sensitivity
+
+net = blockwiseModules(datExpr, power = 30, maxBlockSize = 10606,
+                       deepSplit = 3, pamStage = FALSE,
+                       TOMType = "signed", networkType = "signed", minModuleSize = 30,
+                       reassignThreshold = 0, mergeCutHeight = 0,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = "mnTOM",
+                       verbose = 3)
+
+### To see how many modules were identiﬁed and what the module sizes are
+table(net$colors)
+
+net$colors
+#contains the module assignment, and 
+net$MEs
+
+# open a graphics window
+sizeGrWindow(12, 9)
+# Convert labels to colors for plotting
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "20150119 cluster dendrogram deepsplit 3")
+
+# now save the module assignment and module eigengene information necessary for subsequent analysis.
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+save(MEs, moduleLabels, moduleColors, geneTree,
+     file = "networkConstruction-auto.RData")
+
+
+
+
+
+
+
+
+
+
+### Relating modules to external information and identifying important genes
+# Load the expression and trait data saved in the first part
+lnames = load(file = "20150119_data_Input.RData");
+#The variable lnames contains the names of loaded variables.
+lnames
+# Load network data saved in the second part.
+lnames = load(file = "networkConstruction-auto.RData");
+lnames
+
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+
+### change nSamples according to the number of samples that have the co-variate you are testing
+### since all samples have PC coordinates, nSamples = 40
+
+
+# Will display correlations and their p-values
+
+sizeGrWindow(8,11)
+textMatrix = paste(signif(moduleTraitCor, 2), "/",
+                   signif(moduleTraitPvalue, 1), sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(3, 7, 2, 1));
+
+# Display the correlation values within a heatmap plot
+
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.4,
+               cex.lab = 0.5,
+               zlim = c(-1,1),
+               main = paste("20150119 Module-trait ds3 Cor nSamp40"))
+
+
+###reduce number of columns to show only SEX, GENO, PMI, AGE, PC1-3
+
+reduced_moduleTraitCor = moduleTraitCor[,1:7]
+reduced_moduleTraitPvalue = moduleTraitPvalue[,1:7]
+xLabels = names(datTraits)
+reduced_xLabels = names(datTraits[,1:7])
+
+labeledHeatmap(Matrix = reduced_moduleTraitCor,
+               xLabels = reduced_xLabels,
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               #textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.4,
+               cex.lab = 0.5,
+               zlim = c(-1,1),
+               main = paste("20150119 reduced Module-trait ds3 Cor nSamp40"))
+
+
+# recalculate P value with proper degrees of freedom for cell types and external traits
+
+# for SEX, nSamples = 25
+SEX.moduleTraitCor = moduleTraitCor[,1]
+SEX.moduleTraitPvalue = corPvalueStudent(SEX.moduleTraitCor, 25);
+# multiple hypothesis correction by multiplying each P-value by 55 modules
+MHT.SEX.moduleTraitPvalue = SEX.moduleTraitPvalue*55
+MHT.SEX = as.table(MHT.SEX.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.SEX, file="20150119_MHT_SEX_Pvalue25.txt", row.names=F, quote=F, sep="\t")
+
+# for GENO, nSamples = 13
+GENO.moduleTraitCor = moduleTraitCor[,2]
+GENO.moduleTraitPvalue = corPvalueStudent(GENO.moduleTraitCor, 13);
+# multiple hypothesis correction by multiplying each P-value by 55 modules
+MHT.GENO.moduleTraitPvalue = GENO.moduleTraitPvalue*55
+MHT.GENO = as.table(MHT.GENO.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.GENO, file="20150119_MHT_GENO_Pvalue13.txt", row.names=F, quote=F, sep="\t")
+
+# for PMI, nSamples = 22
+PMI.moduleTraitCor = moduleTraitCor[,3]
+PMI.moduleTraitPvalue = corPvalueStudent(PMI.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 55 modules
+MHT.PMI.moduleTraitPvalue = PMI.moduleTraitPvalue*55
+MHT.PMI = as.table(MHT.PMI.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PMI, file="20150119_MHT_PMI_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for AGE, nSamples = 25
+AGE.moduleTraitCor = moduleTraitCor[,4]
+AGE.moduleTraitPvalue = corPvalueStudent(AGE.moduleTraitCor, 25);
+# multiple hypothesis correction by multiplying each P-value by 55 modules
+MHT.AGE.moduleTraitPvalue = AGE.moduleTraitPvalue*55
+MHT.AGE = as.table(MHT.AGE.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.AGE, file="20150119_MHT_AGE_Pvalue25.txt", row.names=F, quote=F, sep="\t")
+
+# for PC1, nSamples = 40
+PC1.moduleTraitCor = moduleTraitCor[,5]
+PC1.moduleTraitPvalue = corPvalueStudent(PC1.moduleTraitCor, 40);
+# multiple hypothesis correction by multiplying each P-value by 55 modules
+MHT.PC1.moduleTraitPvalue = PC1.moduleTraitPvalue*55
+MHT.PC1 = as.table(MHT.PC1.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC1, file="20150119_MHT_PC1_Pvalue40.txt", row.names=F, quote=F, sep="\t")
+
+# for PC3, nSamples = 40
+PC3.moduleTraitCor = moduleTraitCor[,7]
+PC3.moduleTraitPvalue = corPvalueStudent(PC3.moduleTraitCor, 40);
+# multiple hypothesis correction by multiplying each P-value by 55 modules
+MHT.PC3.moduleTraitPvalue = PC3.moduleTraitPvalue*55
+MHT.PC3 = as.table(MHT.PC3.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC3, file="20150119_MHT_PC3_Pvalue40.txt", row.names=F, quote=F, sep="\t")
+
+
+### 20150119 ended here.
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+###  Exporting a gene network to external visualization software
+### Exporting to Cytoscape
+# Recalculate topological overlap if needed
+# 20150121 set networkType = "signed" and TOMtype = "signed"
+
+TOM = TOMsimilarityFromExpr(datExpr, power = 30, networkType = "signed", TOMType = "signed");
+
+### create a separate Pearson matrix to keep track of correlation and anti-correlation 
+PEAR = cor(datExpr, use = "pairwise.complete.obs", method = "pearson")
+
+
+
+
+### Select modules for PC1pos, PC1neg, PC3pos, and PC3neg threshold p < 0.01 corrected for MHT
+# open MHT corrected module lists, sort by p-value, copy and paste into one spreadsheet
+# advance filter for unique records, copy paste into new spreadsheet, 
+# remove "ME" from each module name, save as .txt file
+PC1PC3modules=read.table("20150121_PC1_PC3_modules.txt", h=F, sep="\t")
+modules = PC1PC3modules[,1]
+
+# Select module probes
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = names(datExpr)[match(modProbes, names(datExpr))];
+
+# Select the corresponding Topological Overlap (PEAR)
+modPEAR = PEAR[inModule, inModule];
+dimnames(modPEAR) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cytPEAR = exportNetworkToCytoscape(modPEAR,
+                                   edgeFile = paste("20150121_PEAR_CytoscapeInput-edges-PC1PC3posneg.txt", sep=""),
+                                   nodeFile = paste("20150121_PEAR_CytoscapeInput-nodes-PC1PC3posneg.txt", sep=""),
+                                   weighted = TRUE,
+                                   threshold = -1.1,
+                                   nodeNames = modProbes,
+                                   altNodeNames = modGenes,
+                                   nodeAttr = moduleColors[inModule]);
+
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM,
+                               edgeFile = paste("20150121_TOM_CytoscapeInput-edges-PC1PC3posneg.txt", sep=""),
+                               nodeFile = paste("20150121_TOM_CytoscapeInput-nodes-PC1PC3posneg.txt", sep=""),
+                               weighted = TRUE,
+                               threshold = -0.1,
+                               nodeNames = modProbes,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule]);
+
+#### read back TOM edge file to merge with PEAR edge file
+a=read.table("20150121_TOM_CytoscapeInput-edges-PC1PC3posneg.txt", h=T, sep=" ")
+b=read.table("20150121_PEAR_CytoscapeInput-edges-PC1PC3posneg.txt", h=T, sep=" ")
+ab=cbind(a,b)
+
+# get a summary of the weight in ab
+summary(ab[,3])
+# 3rd Quartile of TOM edges is shown.  use this as cut off to get top 25% edges
+# get the 95th and 99th percentile of weights
+quantile(ab[,3], c(.95, .99))
+
+# get a summary of the pearson correlation in ab
+summary(ab[,9])
+# just double checking that the 3rd column is really indicating edge weight and not referencing the 9th column
+
+# load library for function ddply
+library(plyr)
+
+#use ab as "test" written previously on 20141010
+test = ab
+
+#create subset table that includes only fromNodes with weight > X (the 99th percentile, etc.)
+#filter for 99th percentile of weights
+testweightX = subset(test, weight > 0.13791572)
+
+#create table that lists the fromNodes along with the length(toNode)
+testweightXlength = ddply(testweightX,.(fromNode),
+                          summarise,
+                          length = length(toNode))
+
+#create subset table that includes only fromNodes with length > Y
+testweightXlengthY = subset(testweightXlength, length > 30)
+
+#create list or fromNodes you want to keep
+keep = testweightXlengthY$fromNode
+
+#create subset table from the weight-filtered table, for fromNodes found in "keep"
+testfilt = subset(testweightX, fromNode %in% keep)
+
+#write table for filtered edge file.  open in excel, annotate each edge as "pos" or "neg" based on Pearson signage
+write.table(testfilt, file="20141015_PC1PC3posneg99w30d.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+# Define variable PC containing the principal component column of datTrait you want gene significance and P-value for.
+
+PC = as.data.frame(datTraits$PC1);
+nSamples = 40 # remember to set appropriate number of samples with the covariate. For PC1, all 40 samples have a coordinate.
+
+names(PC) = "PC1"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(datExpr, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+geneTraitSignificance = as.data.frame(cor(datExpr, PC, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(PC), sep="");
+names(GSPvalue) = paste("p.GS.", names(PC), sep="");
+
+
+# Create the starting data frame
+geneInfo01 = data.frame(geneSymbol = names(datExpr),
+                        moduleColor = moduleColors,
+                        geneTraitSignificance,
+                        GSPvalue)
+# Order modules by their significance for PC
+modOrder = order(-abs(cor(MEs, weight, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+  oldNames = names(geneInfo01)
+  geneInfo01 = data.frame(geneInfo01, geneModuleMembership[, modOrder[mod]],
+                          MMPvalue[, modOrder[mod]]);
+  names(geneInfo01) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+                        paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+
+### write un-ordered csv file for geneInfo01
+write.csv(geneInfo01, file = "geneInfo01_20150331.csv")
+
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+### change $GS.PC1 to $GS.whatever your external trait is
+geneOrder = order(geneInfo01$moduleColor, -abs(geneInfo01$GS.PC1));
+geneInfo = geneInfo01[geneOrder, ]
+
+### write csv file for re-ordered geneInfo
+write.csv(geneInfo, file = "geneInfoPC1.csv")
+
+
+
+
+
+######################################################################################
+
+
+
+
+### 20150209 chow Ruskey for AGE PC1 PC3 module GO
+
+library(Vennerable)
+
+A <- as.vector(scan("AGEneg.txt", what=""))
+B <- as.vector(scan("AGEpos.txt", what=""))
+C <- as.vector(scan("PC1neg.txt", what=""))
+D <- as.vector(scan("PC1pos.txt", what=""))
+E <- as.vector(scan("PC3neg.txt", what=""))
+G <- as.vector(scan("PC3pos.txt", what=""))
+
+
+### try Chow ruskey for all 6 groups
+All <- list(A,B,C,D,E,G)
+names(All) = c("AGEneg",
+               "AGEpos",
+               "PC1neg",
+               "PC1pos",
+               "PC3neg",
+               "PC3pos")
+intersect = Venn(All)
+plot(intersect, type = "ChowRuskey", doWeights = T, doEuler = T)
+
+### Error: length(cutedge) == 1 is not TRUE
+
+
+
+### Chow Ruskey for AGE and PC1
+All <- list(A,B,C,D)
+names(All) = c("AGEneg",
+               "AGEpos",
+               "PC1neg",
+               "PC1pos")
+intersect = Venn(All)
+plot(intersect, type = "ChowRuskey", doWeights = T, doEuler = T)
+plot(intersect, type = "ellipses", doWeights = T, doEuler = T)
+plot(intersect, type = "battle", doWeights = T, doEuler = T)
+plot(intersect, type = "squares", doWeights = T, doEuler = T)
+grid.text("20150209 AGE PC1 module GO", vp = viewport(x=0.5, y=0.975, w=unit(1, "npc"), h=unit(1, "npc")))
+
+
+
+### extract genes represented in AGEneglist
+AGEneglist = intersect@IntersectionSets$'1000'
+write.table(AGEneglist, file="AGEneglist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEposlist
+AGEposlist = intersect@IntersectionSets$'0100'
+write.table(AGEposlist, file="AGEposlist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in PC1neglist
+PC1neglist = intersect@IntersectionSets$'0010'
+write.table(PC1neglist, file="PC1neglist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in PC1poslist
+PC1poslist = intersect@IntersectionSets$'0001'
+write.table(PC1poslist, file="PC1poslist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEnegPC1neglist
+AGEnegPC1neglist = intersect@IntersectionSets$'1010'
+write.table(AGEnegPC1neglist, file="AGEnegPC1neglist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEposPC1poslist
+AGEposPC1poslist = intersect@IntersectionSets$'0101'
+write.table(AGEposPC1poslist, file="AGEposPC1poslist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEnegPC1poslist
+AGEnegPC1poslist = intersect@IntersectionSets$'1001'
+write.table(AGEnegPC1poslist, file="AGEnegPC1poslist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEnegAGEposPC1neglist
+AGEnegAGEposPC1neglist = intersect@IntersectionSets$'1110'
+write.table(AGEnegAGEposPC1neglist, file="AGEnegAGEposPC1neglist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEposPC1neglist
+AGEposPC1neglist = intersect@IntersectionSets$'0110'
+write.table(AGEposPC1neglist, file="AGEposPC1neglist.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in AGEnegAGEposPC1poslist
+AGEnegAGEposPC1poslist = intersect@IntersectionSets$'1101'
+write.table(AGEnegAGEposPC1poslist, file="AGEnegAGEposPC1poslist.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+
+
+
+######################################################################################
+
+
+# 20160504 MA plots Figure 4
+
+
+par(mfrow = c(2,3))
+
+### plot RNA abundance vs log fold change
+
+a<-read.table("20160504_spMNexpr_iMNexpr.txt", h=T, sep="\t")
+
+# AGE spMN
+
+plot(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$AGE == "AGEns",],
+     ylim = c(-0.8, 1.0),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160504 AGE spMN")
+points(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$AGE == "AGEneg",], col = "blue", pch = 16)
+points(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$AGE == "AGEpos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+# PC1 spMN
+
+plot(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$PC1 == "PC1ns",],
+     ylim = c(-0.8, 1.0),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160504 PC1 spMN")
+points(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$PC1 == "PC1neg",], col = "blue", pch = 16)
+points(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$PC1 == "PC1pos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+# PC3 spMN
+
+plot(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$PC3 == "PC3ns",],
+     ylim = c(-0.8, 1.0),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160504 PC3 spMN")
+points(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$PC3 == "PC3pos",], col = "red", pch = 16)
+points(spMN_LOG10_FC ~ spMN_LOG2_AVE, data = a[a$PC3 == "PC3neg",], col = "blue", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+
+
+# AGE iMN
+
+plot(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$AGE == "AGEns",],
+     ylim = c(-0.8, 1.0),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160504 AGE iMN")
+points(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$AGE == "AGEpos",], col = "red", pch = 16)
+points(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$AGE == "AGEneg",], col = "blue", pch = 16)
+abline(a = 0, b = 0)
+
+# PC1 iMN
+
+plot(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$PC1 == "PC1ns",],
+     ylim = c(-0.8, 1.0),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160504 PC1 iMN")
+points(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$PC1 == "PC1pos",], col = "red", pch = 16)
+points(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$PC1 == "PC1neg",], col = "blue", pch = 16)
+abline(a = 0, b = 0)
+
+# PC3 iMN
+
+plot(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$PC3 == "PC3ns",],
+     ylim = c(-0.8, 1.0),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160504 PC3 iMN")
+points(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$PC3 == "PC3pos",], col = "red", pch = 16)
+points(iMN_LOG10_FC ~ iMN_LOG2_AVE, data = a[a$PC3 == "PC3neg",], col = "blue", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+### density plots
+
+par(mfrow = c(4,3))
+
+# iMN y-axis range was c(-1.9, 2.3), but was changed it to c(-0.8, 1.0) to magnify density plot shifts
+
+# AGE spMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$spMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160504 RNA density", b, c))
+  lines(density(blue$spMN_LOG2_AVE), col = "blue")
+  lines(density(red$spMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$spMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$spMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$spMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$spMN_LOG10_FC), col = "grey",
+       ylim = c(0, 3.0),
+       xlim = c(-0.8, 1.0),
+       main = paste("20160504 FC density", b, c))
+  lines(density(blue$spMN_LOG10_FC), col = "blue")
+  lines(density(red$spMN_LOG10_FC), col = "red")
+  abline(v=median(grey$spMN_LOG10_FC), col = "grey")
+  abline(v=median(blue$spMN_LOG10_FC), col = "blue")
+  abline(v=median(red$spMN_LOG10_FC), col = "red")
+}
+
+RNA.density(a, "AGE", "spMN")
+FC.density(a, "AGE", "spMN")
+
+
+# PC1 spMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$spMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160504 RNA density", b, c))
+  lines(density(blue$spMN_LOG2_AVE), col = "blue")
+  lines(density(red$spMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$spMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$spMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$spMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$spMN_LOG10_FC), col = "grey",
+       ylim = c(0, 3.0),
+       xlim = c(-0.8, 1.0),
+       main = paste("20160504 FC density", b, c))
+  lines(density(blue$spMN_LOG10_FC), col = "blue")
+  lines(density(red$spMN_LOG10_FC), col = "red")
+  abline(v=median(grey$spMN_LOG10_FC), col = "grey")
+  abline(v=median(blue$spMN_LOG10_FC), col = "blue")
+  abline(v=median(red$spMN_LOG10_FC), col = "red")
+}
+
+RNA.density(a, "PC1", "spMN")
+FC.density(a, "PC1", "spMN")
+
+
+# PC3 spMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$spMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160504 RNA density", b, c))
+  lines(density(blue$spMN_LOG2_AVE), col = "blue")
+  lines(density(red$spMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$spMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$spMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$spMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$spMN_LOG10_FC), col = "grey",
+       ylim = c(0, 3.0),
+       xlim = c(-0.8, 1.0),
+       main = paste("20160504 FC density", b, c))
+  lines(density(blue$spMN_LOG10_FC), col = "blue")
+  lines(density(red$spMN_LOG10_FC), col = "red")
+  abline(v=median(grey$spMN_LOG10_FC), col = "grey")
+  abline(v=median(blue$spMN_LOG10_FC), col = "blue")
+  abline(v=median(red$spMN_LOG10_FC), col = "red")
+}
+
+RNA.density(a, "PC3", "spMN")
+FC.density(a, "PC3", "spMN")
+
+
+
+
+# AGE iMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$iMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160504 RNA density", b, c))
+  lines(density(blue$iMN_LOG2_AVE), col = "blue")
+  lines(density(red$iMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$iMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$iMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$iMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$iMN_LOG10_FC), col = "grey",
+       ylim = c(0, 3.0),
+       xlim = c(-0.8, 1.0),
+       main = paste("20160504 FC density", b, c))
+  lines(density(blue$iMN_LOG10_FC), col = "blue")
+  lines(density(red$iMN_LOG10_FC), col = "red")
+  abline(v=median(grey$iMN_LOG10_FC), col = "grey")
+  abline(v=median(blue$iMN_LOG10_FC), col = "blue")
+  abline(v=median(red$iMN_LOG10_FC), col = "red")
+}
+
+RNA.density(a, "AGE", "iMN")
+FC.density(a, "AGE", "iMN")
+
+
+# PC1 iMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$iMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160504 RNA density", b, c))
+  lines(density(blue$iMN_LOG2_AVE), col = "blue")
+  lines(density(red$iMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$iMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$iMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$iMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$iMN_LOG10_FC), col = "grey",
+       ylim = c(0, 3.0),
+       xlim = c(-0.8, 1.0),
+       main = paste("20160504 FC density", b, c))
+  lines(density(blue$iMN_LOG10_FC), col = "blue")
+  lines(density(red$iMN_LOG10_FC), col = "red")
+  abline(v=median(grey$iMN_LOG10_FC), col = "grey")
+  abline(v=median(blue$iMN_LOG10_FC), col = "blue")
+  abline(v=median(red$iMN_LOG10_FC), col = "red")
+}
+
+RNA.density(a, "PC1", "iMN")
+FC.density(a, "PC1", "iMN")
+
+
+# PC3 iMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$iMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160504 RNA density", b, c))
+  lines(density(blue$iMN_LOG2_AVE), col = "blue")
+  lines(density(red$iMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$iMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$iMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$iMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$iMN_LOG10_FC), col = "grey",
+       ylim = c(0, 3.0),
+       xlim = c(-0.8, 1.0),
+       main = paste("20160504 FC density", b, c))
+  lines(density(blue$iMN_LOG10_FC), col = "blue")
+  lines(density(red$iMN_LOG10_FC), col = "red")
+  abline(v=median(grey$iMN_LOG10_FC), col = "grey")
+  abline(v=median(blue$iMN_LOG10_FC), col = "blue")
+  abline(v=median(red$iMN_LOG10_FC), col = "red")
+}
+
+RNA.density(a, "PC3", "iMN")
+FC.density(a, "PC3", "iMN")
+
+
+
+
+
+################################
+
+
+
+
+
+####### Kolmogorov-Smirnov test
+
+# AGE spMN
+
+grey <- a[a$AGE == "AGEns",]
+blue <- a[a$AGE == "AGEneg",]
+red <- a[a$AGE == "AGEpos",]
+
+ks.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+ks.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+
+ks.test(grey$spMN_LOG10_FC, red$spMN_LOG10_FC)
+wilcox.test(grey$spMN_LOG10_FC, red$spMN_LOG10_FC)
+ks.test(grey$spMN_LOG10_FC, blue$spMN_LOG10_FC)
+wilcox.test(grey$spMN_LOG10_FC, blue$spMN_LOG10_FC)
+
+
+
+# PC1 spMN
+
+grey <- a[a$PC1 == "PC1ns",]
+blue <- a[a$PC1 == "PC1neg",]
+red <- a[a$PC1 == "PC1pos",]
+
+ks.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+ks.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+
+ks.test(grey$spMN_LOG10_FC, red$spMN_LOG10_FC)
+wilcox.test(grey$spMN_LOG10_FC, red$spMN_LOG10_FC)
+ks.test(grey$spMN_LOG10_FC, blue$spMN_LOG10_FC)
+wilcox.test(grey$spMN_LOG10_FC, blue$spMN_LOG10_FC)
+
+
+
+# PC3 spMN
+
+grey <- a[a$PC3 == "PC3ns",]
+blue <- a[a$PC3 == "PC3neg",]
+red <- a[a$PC3 == "PC3pos",]
+
+ks.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+ks.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+
+ks.test(grey$spMN_LOG10_FC, red$spMN_LOG10_FC)
+wilcox.test(grey$spMN_LOG10_FC, red$spMN_LOG10_FC)
+ks.test(grey$spMN_LOG10_FC, blue$spMN_LOG10_FC)
+wilcox.test(grey$spMN_LOG10_FC, blue$spMN_LOG10_FC)
+
+
+
+
+
+# AGE iMN
+
+grey <- a[a$AGE == "AGEns",]
+blue <- a[a$AGE == "AGEneg",]
+red <- a[a$AGE == "AGEpos",]
+
+ks.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+ks.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+
+ks.test(grey$iMN_LOG10_FC, red$iMN_LOG10_FC)
+wilcox.test(grey$iMN_LOG10_FC, red$iMN_LOG10_FC)
+ks.test(grey$iMN_LOG10_FC, blue$iMN_LOG10_FC)
+wilcox.test(grey$iMN_LOG10_FC, blue$iMN_LOG10_FC)
+
+
+
+# PC1 iMN
+
+grey <- a[a$PC1 == "PC1ns",]
+blue <- a[a$PC1 == "PC1neg",]
+red <- a[a$PC1 == "PC1pos",]
+
+ks.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+ks.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+
+ks.test(grey$iMN_LOG10_FC, red$iMN_LOG10_FC)
+wilcox.test(grey$iMN_LOG10_FC, red$iMN_LOG10_FC)
+ks.test(grey$iMN_LOG10_FC, blue$iMN_LOG10_FC)
+wilcox.test(grey$iMN_LOG10_FC, blue$iMN_LOG10_FC)
+
+
+
+# PC3 iMN
+
+grey <- a[a$PC3 == "PC3ns",]
+blue <- a[a$PC3 == "PC3neg",]
+red <- a[a$PC3 == "PC3pos",]
+
+ks.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+ks.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+
+ks.test(grey$iMN_LOG10_FC, red$iMN_LOG10_FC)
+wilcox.test(grey$iMN_LOG10_FC, red$iMN_LOG10_FC)
+ks.test(grey$iMN_LOG10_FC, blue$iMN_LOG10_FC)
+wilcox.test(grey$iMN_LOG10_FC, blue$iMN_LOG10_FC)
+
+
+##########################################################################
+
+# 20160218 plot MA plots figure 4
+
+getwd()
+
+### merge module color with expression data for SOD1 and CTRL spMN with iMN
+a <- read.table("20160218_spMN_expr.txt", h=T, sep="\t")
+b <- read.table("20160218_iMN_expr.txt", h=T, sep="\t")
+ab <- cbind(a,b[match(a$Gene,b$Gene),])
+write.table(ab, file="20160218_spMNexpr_iMNexpr_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+par(mfrow = c(1,1))
+
+
+### plot RNA abundance vs log fold change
+
+a<-read.table("20160218_spMNexpr_iMNexpr.txt", h=T, sep="\t")
+
+
+
+# AGE spMN
+
+plot(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$AGE == "AGEns",],
+     ylim = c(-8, 8),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160218 AGE spMN")
+
+points(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$AGE == "AGEneg",], col = "blue", pch = 16)
+points(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$AGE == "AGEpos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+# AGE iMN
+
+plot(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$AGE == "AGEns",],
+     ylim = c(-8, 8),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160218 AGE iMN")
+
+points(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$AGE == "AGEneg",], col = "blue", pch = 16)
+points(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$AGE == "AGEpos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+# PC1 spMN
+
+plot(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$PC1 == "PC1ns",],
+     ylim = c(-8, 8),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160218 PC1 spMN")
+
+points(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$PC1 == "PC1neg",], col = "blue", pch = 16)
+points(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$PC1 == "PC1pos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+# PC1 iMN
+
+plot(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$PC1 == "PC1ns",],
+     ylim = c(-8, 8),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160218 PC1 iMN")
+
+points(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$PC1 == "PC1neg",], col = "blue", pch = 16)
+points(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$PC1 == "PC1pos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+# PC3 spMN
+
+plot(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$PC3 == "PC3ns",],
+     ylim = c(-8, 8),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160218 PC3 spMN")
+
+points(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$PC3 == "PC3neg",], col = "blue", pch = 16)
+points(spMN_LOG2_FC ~ spMN_LOG2_AVE, data = a[a$PC3 == "PC3pos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+# PC3 iMN
+
+plot(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$PC3 == "PC3ns",],
+     ylim = c(-8, 8),
+     xlim = c(2,16),
+     col = "grey", pch = 16, main = "20160218 PC3 iMN")
+
+points(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$PC3 == "PC3neg",], col = "blue", pch = 16)
+points(iMN_LOG2_FC ~ iMN_LOG2_AVE, data = a[a$PC3 == "PC3pos",], col = "red", pch = 16)
+abline(a = 0, b = 0)
+
+
+
+
+
+# Density plots
+
+# AGE spMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$spMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160218 RNA density", b, c))
+  lines(density(blue$spMN_LOG2_AVE), col = "blue")
+  lines(density(red$spMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$spMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$spMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$spMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$spMN_LOG2_FC), col = "grey",
+       ylim = c(0, 1.5),
+       xlim = c(-8, 8),
+       main = paste("20160218 FC density", b, c))
+  lines(density(blue$spMN_LOG2_FC), col = "blue")
+  lines(density(red$spMN_LOG2_FC), col = "red")
+  abline(v=median(grey$spMN_LOG2_FC), col = "grey")
+  abline(v=median(blue$spMN_LOG2_FC), col = "blue")
+  abline(v=median(red$spMN_LOG2_FC), col = "red")
+}
+
+par(mfrow = c(2,1))
+
+RNA.density(a, "AGE", "spMN")
+FC.density(a, "AGE", "spMN")
+
+
+
+
+# PC1 spMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$spMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160218 RNA density", b, c))
+  lines(density(blue$spMN_LOG2_AVE), col = "blue")
+  lines(density(red$spMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$spMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$spMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$spMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$spMN_LOG2_FC), col = "grey",
+       ylim = c(0, 1.5),
+       xlim = c(-8, 8),
+       main = paste("20160218 FC density", b, c))
+  lines(density(blue$spMN_LOG2_FC), col = "blue")
+  lines(density(red$spMN_LOG2_FC), col = "red")
+  abline(v=median(grey$spMN_LOG2_FC), col = "grey")
+  abline(v=median(blue$spMN_LOG2_FC), col = "blue")
+  abline(v=median(red$spMN_LOG2_FC), col = "red")
+}
+
+par(mfrow = c(2,1))
+
+RNA.density(a, "PC1", "spMN")
+FC.density(a, "PC1", "spMN")
+
+
+
+# PC3 spMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$spMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160218 RNA density", b, c))
+  lines(density(blue$spMN_LOG2_AVE), col = "blue")
+  lines(density(red$spMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$spMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$spMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$spMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$spMN_LOG2_FC), col = "grey",
+       ylim = c(0, 1.5),
+       xlim = c(-8, 8),
+       main = paste("20160218 FC density", b, c))
+  lines(density(blue$spMN_LOG2_FC), col = "blue")
+  lines(density(red$spMN_LOG2_FC), col = "red")
+  abline(v=median(grey$spMN_LOG2_FC), col = "grey")
+  abline(v=median(blue$spMN_LOG2_FC), col = "blue")
+  abline(v=median(red$spMN_LOG2_FC), col = "red")
+}
+
+par(mfrow = c(2,1))
+
+RNA.density(a, "PC3", "spMN")
+FC.density(a, "PC3", "spMN")
+
+
+
+
+
+# AGE iMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$iMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160218 RNA density", b, c))
+  lines(density(blue$iMN_LOG2_AVE), col = "blue")
+  lines(density(red$iMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$iMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$iMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$iMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$AGE == "AGEns",]
+  blue <- a[a$AGE == "AGEneg",]
+  red <- a[a$AGE == "AGEpos",]
+  plot(density(grey$iMN_LOG2_FC), col = "grey",
+       ylim = c(0, 1.5),
+       xlim = c(-8, 8),
+       main = paste("20160218 FC density", b, c))
+  lines(density(blue$iMN_LOG2_FC), col = "blue")
+  lines(density(red$iMN_LOG2_FC), col = "red")
+  abline(v=median(grey$iMN_LOG2_FC), col = "grey")
+  abline(v=median(blue$iMN_LOG2_FC), col = "blue")
+  abline(v=median(red$iMN_LOG2_FC), col = "red")
+}
+
+par(mfrow = c(2,1))
+
+RNA.density(a, "AGE", "iMN")
+FC.density(a, "AGE", "iMN")
+
+
+
+
+# PC1 iMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$iMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160218 RNA density", b, c))
+  lines(density(blue$iMN_LOG2_AVE), col = "blue")
+  lines(density(red$iMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$iMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$iMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$iMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC1 == "PC1ns",]
+  blue <- a[a$PC1 == "PC1neg",]
+  red <- a[a$PC1 == "PC1pos",]
+  plot(density(grey$iMN_LOG2_FC), col = "grey",
+       ylim = c(0, 1.5),
+       xlim = c(-8, 8),
+       main = paste("20160218 FC density", b, c))
+  lines(density(blue$iMN_LOG2_FC), col = "blue")
+  lines(density(red$iMN_LOG2_FC), col = "red")
+  abline(v=median(grey$iMN_LOG2_FC), col = "grey")
+  abline(v=median(blue$iMN_LOG2_FC), col = "blue")
+  abline(v=median(red$iMN_LOG2_FC), col = "red")
+}
+
+par(mfrow = c(2,1))
+
+RNA.density(a, "PC1", "iMN")
+FC.density(a, "PC1", "iMN")
+
+
+
+# PC3 iMN
+
+RNA.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$iMN_LOG2_AVE), col = "grey",
+       ylim = c(0,0.35),
+       xlim = c(2,16),
+       main = paste("20160218 RNA density", b, c))
+  lines(density(blue$iMN_LOG2_AVE), col = "blue")
+  lines(density(red$iMN_LOG2_AVE), col = "red")
+  abline(v=median(grey$iMN_LOG2_AVE), col = "grey")
+  abline(v=median(blue$iMN_LOG2_AVE), col = "blue")
+  abline(v=median(red$iMN_LOG2_AVE), col = "red")
+}
+
+FC.density <- function(a, b, c){
+  grey <- a[a$PC3 == "PC3ns",]
+  blue <- a[a$PC3 == "PC3neg",]
+  red <- a[a$PC3 == "PC3pos",]
+  plot(density(grey$iMN_LOG2_FC), col = "grey",
+       ylim = c(0, 1.5),
+       xlim = c(-8, 8),
+       main = paste("20160218 FC density", b, c))
+  lines(density(blue$iMN_LOG2_FC), col = "blue")
+  lines(density(red$iMN_LOG2_FC), col = "red")
+  abline(v=median(grey$iMN_LOG2_FC), col = "grey")
+  abline(v=median(blue$iMN_LOG2_FC), col = "blue")
+  abline(v=median(red$iMN_LOG2_FC), col = "red")
+}
+
+par(mfrow = c(2,1))
+
+RNA.density(a, "PC3", "iMN")
+FC.density(a, "PC3", "iMN")
+
+
+
+
+
+####### Kolmogorov-Smirnov test
+
+# AGE spMN
+
+grey <- a[a$AGE == "AGEns",]
+blue <- a[a$AGE == "AGEneg",]
+red <- a[a$AGE == "AGEpos",]
+
+ks.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+ks.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+
+ks.test(grey$spMN_LOG2_FC, red$spMN_LOG2_FC)
+wilcox.test(grey$spMN_LOG2_FC, red$spMN_LOG2_FC)
+ks.test(grey$spMN_LOG2_FC, blue$spMN_LOG2_FC)
+wilcox.test(grey$spMN_LOG2_FC, blue$spMN_LOG2_FC)
+
+
+
+# PC1 spMN
+
+grey <- a[a$PC1 == "PC1ns",]
+blue <- a[a$PC1 == "PC1neg",]
+red <- a[a$PC1 == "PC1pos",]
+
+ks.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+ks.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+
+ks.test(grey$spMN_LOG2_FC, red$spMN_LOG2_FC)
+wilcox.test(grey$spMN_LOG2_FC, red$spMN_LOG2_FC)
+ks.test(grey$spMN_LOG2_FC, blue$spMN_LOG2_FC)
+wilcox.test(grey$spMN_LOG2_FC, blue$spMN_LOG2_FC)
+
+
+
+# PC3 spMN
+
+grey <- a[a$PC3 == "PC3ns",]
+blue <- a[a$PC3 == "PC3neg",]
+red <- a[a$PC3 == "PC3pos",]
+
+ks.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, red$spMN_LOG2_AVE)
+ks.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+wilcox.test(grey$spMN_LOG2_AVE, blue$spMN_LOG2_AVE)
+
+ks.test(grey$spMN_LOG2_FC, red$spMN_LOG2_FC)
+wilcox.test(grey$spMN_LOG2_FC, red$spMN_LOG2_FC)
+ks.test(grey$spMN_LOG2_FC, blue$spMN_LOG2_FC)
+wilcox.test(grey$spMN_LOG2_FC, blue$spMN_LOG2_FC)
+
+
+
+
+
+# AGE iMN
+
+grey <- a[a$AGE == "AGEns",]
+blue <- a[a$AGE == "AGEneg",]
+red <- a[a$AGE == "AGEpos",]
+
+ks.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+ks.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+
+ks.test(grey$iMN_LOG2_FC, red$iMN_LOG2_FC)
+wilcox.test(grey$iMN_LOG2_FC, red$iMN_LOG2_FC)
+ks.test(grey$iMN_LOG2_FC, blue$iMN_LOG2_FC)
+wilcox.test(grey$iMN_LOG2_FC, blue$iMN_LOG2_FC)
+
+
+
+# PC1 iMN
+
+grey <- a[a$PC1 == "PC1ns",]
+blue <- a[a$PC1 == "PC1neg",]
+red <- a[a$PC1 == "PC1pos",]
+
+ks.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+ks.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+
+ks.test(grey$iMN_LOG2_FC, red$iMN_LOG2_FC)
+wilcox.test(grey$iMN_LOG2_FC, red$iMN_LOG2_FC)
+ks.test(grey$iMN_LOG2_FC, blue$iMN_LOG2_FC)
+wilcox.test(grey$iMN_LOG2_FC, blue$iMN_LOG2_FC)
+
+
+
+# PC3 iMN
+
+grey <- a[a$PC3 == "PC3ns",]
+blue <- a[a$PC3 == "PC3neg",]
+red <- a[a$PC3 == "PC3pos",]
+
+ks.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, red$iMN_LOG2_AVE)
+ks.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+wilcox.test(grey$iMN_LOG2_AVE, blue$iMN_LOG2_AVE)
+
+ks.test(grey$iMN_LOG2_FC, red$iMN_LOG2_FC)
+wilcox.test(grey$iMN_LOG2_FC, red$iMN_LOG2_FC)
+ks.test(grey$iMN_LOG2_FC, blue$iMN_LOG2_FC)
+wilcox.test(grey$iMN_LOG2_FC, blue$iMN_LOG2_FC)
+
+
+
+
+######################################################################################
+
+
+
+
+
+############################################################################
+
+### 20150615 Ravits WGCNA (sALS data set)
+
+
+library(WGCNA)
+getwd()
+options(stringsAsFactors = FALSE)
+
+a=read.table("20150608_RavitsGmaxNQL.txt", h=T, sep="\t")
+dim(a)
+names(a)
+
+### define expression data, gene names and array names
+datExpr0 = as.data.frame(t(a[, -c(1)]))
+names(datExpr0) = a$GENE
+rownames(datExpr0) = names(a)[-c(1)]
+
+### check for missing values and bad arrays
+gsg = goodSamplesGenes(datExpr0, verbose = 3)
+gsg$allOK
+
+### to remove offending genes and samples from data
+if (!gsg$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg$goodGenes)>0)
+    printFlush(paste("Removing genes:", paste(names(datExpr0)[!gsg$goodGenes], collapse = ", ")));
+  if (sum(!gsg$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr0)[!gsg$goodSamples], collapse = ", ")));
+  # Remove the offending genes and samples from the data:
+  datExpr0 = datExpr0[gsg$goodSamples, gsg$goodGenes]
+}
+
+### cluster samples with hclust
+sampleTree = hclust(dist(datExpr0), method = "average")
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(12,9)
+#pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6)
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+
+
+
+
+
+### determine height to cut out samples.  setting it at 90 in this instance keeps all samples.
+abline(h = 90, col = "red")
+# Determine cluster under the line
+clust = cutreeStatic(sampleTree, cutHeight = 90, minSize = 10)
+table(clust)
+# clust 1 contains the samples we want to keep.
+keepSamples = (clust==1)
+datExpr = datExpr0[keepSamples, ]
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+# The variable datExpr now contains the expression data ready for network analysis.
+
+
+
+### now read in trait data
+traitData = read.table("20150615_RavitsGmaxNQL_PCAcoord_traits.txt", h=T, sep="\t")
+dim(traitData)
+names(traitData)
+
+# remove any columns that hold information we do not need.  in this instance, i keep all
+allTraits = traitData
+allTraits = allTraits[,c(1:12)]
+dim(allTraits)
+names(allTraits)
+
+# Form a data frame analogous to expression data that will hold the clinical traits.
+allSamples = rownames(datExpr);
+traitRows = match(allSamples, allTraits$EIGVALUE);
+datTraits = allTraits[traitRows, -1];
+rownames(datTraits) = allTraits[traitRows, 1];
+collectGarbage()
+
+
+# Re-cluster samples
+sampleTree2 = hclust(dist(datExpr), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits, signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits),
+                    main = "20150615 Sample dendrogram and trait heatmap")
+
+save(datExpr, datTraits, file = "20150615_data_Input.RData")
+
+
+
+### looks like 21 as a power approximates fit to scale free topology
+#   as seen for WGCNA done on 20150119:
+#   signedR^2 is 0.836, meanK is 3.125
+### increase maxBlockSize parameter to 15615 to fit all 15614 genes into one block
+### deepsplit = 0 to increase specificity
+### deepsplit = 3 to increase sensitivity
+
+net = blockwiseModules(datExpr, power = 21, maxBlockSize = 15615,
+                       deepSplit = 3, pamStage = FALSE,
+                       TOMType = "signed", networkType = "signed", minModuleSize = 30,
+                       reassignThreshold = 0, mergeCutHeight = 0,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = "mnTOM",
+                       verbose = 3)
+
+### To see how many modules were identiﬁed and what the module sizes are
+table(net$colors)
+
+net$colors
+#contains the module assignment, and 
+net$MEs
+
+
+# open a graphics window
+sizeGrWindow(12, 9)
+# Convert labels to colors for plotting
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "20150615 cluster dendrogram deepsplit 3")
+
+#now save the module assignment and module eigengene information necessary for subsequent analysis.
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+save(MEs, moduleLabels, moduleColors, geneTree,
+     file = "networkConstruction-auto.RData")
+
+
+
+
+
+### Relating modules to external information and identifying important genes
+# Load the expression and trait data saved in the first part
+lnames = load(file = "20150615_data_Input.RData");
+#The variable lnames contains the names of loaded variables.
+lnames
+# Load network data saved in the second part.
+lnames = load(file = "networkConstruction-auto.RData");
+lnames
+
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+
+### 20150622 change nSamples to 12 to get proper degrees of freedom for site of onset and disease course
+nSamples = 12
+
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+
+### write table for cor and pvalues for nSamples = 22
+write.table(moduleTraitCor, file="20150617_moduleTraitCor.txt", row.names=names(MEs), quote=F, sep="\t")
+write.table(moduleTraitPvalue, file="20150617_moduleTraitPvalue.txt", row.names=names(MEs), quote=F, sep="\t")
+
+### write table for cor and pvalues for nSamples = 12
+write.table(moduleTraitCor, file="20150622_moduleTraitCor.txt", row.names=names(MEs), quote=F, sep="\t")
+write.table(moduleTraitPvalue, file="20150622_moduleTraitPvalue.txt", row.names=names(MEs), quote=F, sep="\t")
+
+
+
+### Benjamini Hochberg adjust P-values for nSamples = 22
+RH.Pvals <-read.table("20150617_moduleTraitPvalue_nogrey.txt", h=T, sep="\t") ### remove grey module from table
+RH.adj.Pval <- RH.Pvals
+
+for(j in 2:length(RH.Pvals)) {
+  p = RH.Pvals[,j]
+  z = p.adjust(p, method = "BH", n = length(p))
+  RH.adj.Pval[,j+11] = z
+}
+
+write.table(RH.adj.Pval, file="20150617_moduleTraitPvalue_Padj.txt", row.names=F, quote=F, sep="\t")
+
+
+
+### Benjamini Hochberg adjust P-values for nSamples = 12
+RH.Pvals <-read.table("20150622_moduleTraitPvalue_nogrey.txt", h=T, sep="\t")
+RH.adj.Pval <- RH.Pvals
+
+for(j in 2:length(RH.Pvals)) {
+  p = RH.Pvals[,j]
+  z = p.adjust(p, method = "BH", n = length(p))
+  RH.adj.Pval[,j+11] = z
+}
+
+write.table(RH.adj.Pval, file="20150622_moduleTraitPvalue_Padj.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+# recalculate P value with proper degrees of freedom for cell types and external traits
+
+# for SEX, nSamp = 22
+SEX.moduleTraitCor = moduleTraitCor[,1]
+SEX.moduleTraitPvalue = corPvalueStudent(SEX.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.SEX.moduleTraitPvalue = SEX.moduleTraitPvalue*52
+MHT.SEX = as.table(MHT.SEX.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.SEX, file="20150615_MHT_SEX_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for PHENO, nSamp = 22
+PHENO.moduleTraitCor = moduleTraitCor[,2]
+PHENO.moduleTraitPvalue = corPvalueStudent(PHENO.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PHENO.moduleTraitPvalue = PHENO.moduleTraitPvalue*52
+MHT.PHENO = as.table(MHT.PHENO.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PHENO, file="20150615_MHT_PHENO_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for ONSET_SITE, nSamp = 12
+OSS.moduleTraitCor = moduleTraitCor[,3]
+OSS.moduleTraitPvalue = corPvalueStudent(OSS.moduleTraitCor, 12);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.OSS.moduleTraitPvalue = OSS.moduleTraitPvalue*52
+MHT.OSS = as.table(MHT.OSS.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.OSS, file="20150615_MHT_OSS_Pvalue12.txt", row.names=F, quote=F, sep="\t")
+
+# for AGE, nSamp = 22
+AGE.moduleTraitCor = moduleTraitCor[,4]
+AGE.moduleTraitPvalue = corPvalueStudent(AGE.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.AGE.moduleTraitPvalue = AGE.moduleTraitPvalue*52
+MHT.AGE = as.table(MHT.AGE.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.AGE, file="20150615_MHT_AGE_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for DISEASE_COURSE, nSamp = 12
+DISEASE.moduleTraitCor = moduleTraitCor[,5]
+DISEASE.moduleTraitPvalue = corPvalueStudent(DISEASE.moduleTraitCor, 12);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.DISEASE.moduleTraitPvalue = DISEASE.moduleTraitPvalue*52
+MHT.DISEASE = as.table(MHT.DISEASE.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.DISEASE, file="20150615_MHT_DISEASE_Pvalue12.txt", row.names=F, quote=F, sep="\t")
+
+# for PMI, nSamp = 22
+PMI.moduleTraitCor = moduleTraitCor[,6]
+PMI.moduleTraitPvalue = corPvalueStudent(PMI.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PMI.moduleTraitPvalue = PMI.moduleTraitPvalue*52
+MHT.PMI = as.table(MHT.PMI.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PMI, file="20150615_MHT_PMI_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for PC1, nSamp = 22
+PC1.moduleTraitCor = moduleTraitCor[,7]
+PC1.moduleTraitPvalue = corPvalueStudent(PC1.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PC1.moduleTraitPvalue = PC1.moduleTraitPvalue*52
+MHT.PC1 = as.table(MHT.PC1.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC1, file="20150615_MHT_PC1_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for PC2, nSamp = 22
+PC2.moduleTraitCor = moduleTraitCor[,8]
+PC2.moduleTraitPvalue = corPvalueStudent(PC2.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PC2.moduleTraitPvalue = PC2.moduleTraitPvalue*52
+MHT.PC2 = as.table(MHT.PC2.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC2, file="20150615_MHT_PC2_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for PC3, nSamp = 22
+PC3.moduleTraitCor = moduleTraitCor[,9]
+PC3.moduleTraitPvalue = corPvalueStudent(PC3.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PC3.moduleTraitPvalue = PC3.moduleTraitPvalue*52
+MHT.PC3 = as.table(MHT.PC3.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC3, file="20150615_MHT_PC3_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for PC4, nSamp = 22
+PC4.moduleTraitCor = moduleTraitCor[,10]
+PC4.moduleTraitPvalue = corPvalueStudent(PC4.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PC4.moduleTraitPvalue = PC4.moduleTraitPvalue*52
+MHT.PC4 = as.table(MHT.PC4.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC4, file="20150615_MHT_PC4_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+# for PC5, nSamp = 22
+PC5.moduleTraitCor = moduleTraitCor[,11]
+PC5.moduleTraitPvalue = corPvalueStudent(PC5.moduleTraitCor, 22);
+# multiple hypothesis correction by multiplying each P-value by 52 modules
+MHT.PC5.moduleTraitPvalue = PC5.moduleTraitPvalue*52
+MHT.PC5 = as.table(MHT.PC5.moduleTraitPvalue, h=T, sep="\t")
+write.table(MHT.PC5, file="20150615_MHT_PC5_Pvalue22.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+### need to export geneInfo
+
+
+# Define variable PC containing the principal component column of datTrait you want gene significance and P-value for.
+
+PC = as.data.frame(datTraits$PC1);
+nSamples = 22 # remember to set appropriate number of samples with the covariate. For PC1, all 22 samples have a coordinate.
+
+
+names(PC) = "PC1"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(datExpr, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+geneTraitSignificance = as.data.frame(cor(datExpr, PC, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(PC), sep="");
+names(GSPvalue) = paste("p.GS.", names(PC), sep="");
+
+# Create the starting data frame
+geneInfo0 = data.frame(geneSymbol = names(datExpr),
+                       moduleColor = moduleColors,
+                       geneTraitSignificance,
+                       GSPvalue)
+# Order modules by their significance for PC
+modOrder = order(-abs(cor(MEs, PC, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+                         MMPvalue[, modOrder[mod]]);
+  names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+                       paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+
+### write un-ordered csv file for geneInfo0
+write.csv(geneInfo0, file = "20150615_geneInfo0.csv")
+
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+### change $GS.PC1 to $GS.whatever your external trait is
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.PC1));
+geneInfo = geneInfo0[geneOrder, ]
+
+### write csv file for re-ordered geneInfo
+write.csv(geneInfo, file = "20150615_geneInfoPC1.csv")
+
+
+###################################################################################
+
+
+
+### RH hyper with hPVAC modules (Hypergeometric tests between sALS and iMN modules)
+
+### total balls = 21279 genes represented on both HGU133a2 and Affy exon array
+
+a=read.table("HGU133a2_probe_gene_refseq_ensembl_annotate.txt", h=T, sep="\t")
+b=read.table("HGU133Plus2_0-HuEx1_0st-transcript-cluster-mapping.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$Probe,b$ivt_id),])
+write.table(ab, file="20150615_HGU133a2_HuEx_merge_probe.txt", row.names=F, quote=F, sep="\t")
+
+### annotate OBA to hGENE info (iMN)
+a=read.table("20150615_genesOBA.txt", h=T, sep="\t")
+b=read.table("20150329_hGENE_info.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$Gene,b$hGENE),])
+write.table(ab, file="20150615_OBA_hGENEinfo_merge.txt", row.names=F, quote=F, sep="\t")
+
+### annotate OBA to Ravits info (sALS)
+a=read.table("20150615_genesOBA.txt", h=T, sep="\t")
+b=read.table("20150615_Ravits_geneInfo.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$Gene,b$geneSymbol),])
+write.table(ab, file="20150615_OBA_RavitsGeneInfo_merge.txt", row.names=F, quote=F, sep="\t")
+
+# need Vennerable package loaded
+library(Vennerable)
+
+# testing hypergeometric probability in module overlaps
+RH.hyper <- function(x,y) {
+  All = list(x,y)
+  intersect = Venn(All)
+  list = intersect@IntersectionSets$'11'
+  length.list = length(list)
+  dhyper(length.list, length(x), 21279-length(x), length(y))
+}
+
+
+
+# read in filtered gene info tables appropriate for hypergeo testing
+OBA.hPVAC <- read.table("20150615_OBA_hGENEinfo.txt", h=T, sep="\t")
+draw.Ravits <- read.table("20150615_OBA_RavitsGeneInfo.txt", h=T, sep="\t")
+
+# collapse human module colors into table with name and size of each module
+class(OBA.hPVAC$moduleColor)
+human.mod.length <- aggregate(. ~ moduleColor, data = OBA.hPVAC, length)
+write.table(human.mod.length, file="20150615_hPVAC_module_length.txt", row.names=F, quote=F, sep="\t")
+
+# collapse human module colors into table with name and size of each module
+class(draw.Ravits$moduleColor)
+Ravits.mod.length <- aggregate(. ~ moduleColor, data = draw.Ravits, length)
+write.table(Ravits.mod.length, file="20150615_Ravits_module_length.txt", row.names=F, quote=F, sep="\t")
+
+# check dimensions
+dim(human.mod.length)
+dim(Ravits.mod.length)
+
+
+
+for(j in 1:length(human.mod.length[,1])) {
+  x = as.vector(OBA.hPVAC$hGENE[ OBA.hPVAC$moduleColor == human.mod.length[j,1]])
+  for(i in 1:length(Ravits.mod.length[,1])) {
+    y = as.vector(draw.Ravits$Gene[ draw.Ravits$moduleColor == Ravits.mod.length[i,1]])
+    z = RH.hyper(x,y)
+    Ravits.mod.length[i,j+3] = z
+  }
+}
+
+write.table(Ravits.mod.length, file="20150615_RH_hyper_test.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### Benjamini Hochberg adjust P-values (remove grey module first)
+RH.Pvals <-read.table("20150615_RH_hyper_test_nogrey.txt", h=T, sep="\t")
+RH.adj.Pval <- RH.Pvals
+
+for(j in 2:length(RH.Pvals)) {
+  p = RH.Pvals[,j]
+  z = p.adjust(p, method = "BH", n = length(p))
+  RH.adj.Pval[,j+55] = z
+}
+
+write.table(RH.adj.Pval, file="20150615_RH_hyper_modules_Padj.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+######################################################################################
+
+
+
+
+### 20150622 hPVAC (iMN) and Ravits (sALS) PC1 AGE modules overlaps to calculate Gene significance, intramodule membership, or intermodule membership
+
+### read and merge class modules
+
+### extract list of genes and geneInfo from sALS data sets into either PC1pos or PC1neg groups
+
+a=read.table("20150622_Ravits15614_geneInfoPC1.txt", h=T, sep="\t")
+b=read.table("20150622_Ravits_PC1_neg.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$moduleColor,b$Gene),])
+write.table(ab, file="20150622_RavitsGeneInfo_PC1neg_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_Ravits15614_geneInfoPC1.txt", h=T, sep="\t")
+b=read.table("20150622_Ravits_PC1_pos.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$moduleColor,b$Gene),])
+write.table(ab, file="20150622_RavitsGeneInfo_PC1pos_merge.txt", row.names=F, quote=F, sep="\t")
+
+### extract list of genes and geneInfo from iMN data sets into either AGEposPC1pos or AGEnegPC1neg groups
+
+a=read.table("20150622_hPVAC10605_geneInfoPC1.txt", h=T, sep="\t")
+b=read.table("20150622_hPVAC_PC1_AGE_neg.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$moduleColor,b$Gene),])
+write.table(ab, file="20150622_hPVACGeneInfoPC1_PC1AGEneg_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_hPVAC10605_geneInfoPC1.txt", h=T, sep="\t")
+b=read.table("20150622_hPVAC_PC1_AGE_pos.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$moduleColor,b$Gene),])
+write.table(ab, file="20150622_hPVACGeneInfoPC1_PC1AGEpos_merge.txt", row.names=F, quote=F, sep="\t")
+
+### merge hPVAC (iMN) geneInfo for AGE as well to calculate Gene significance against AGE
+
+a=read.table("20150622_hPVAC10605_geneInfoAGE.txt", h=T, sep="\t")
+b=read.table("20150622_hPVAC_PC1_AGE_neg.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$moduleColor,b$Gene),])
+write.table(ab, file="20150622_hPVACGeneInfoAGE_PC1AGEneg_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_hPVAC10605_geneInfoAGE.txt", h=T, sep="\t")
+b=read.table("20150622_hPVAC_PC1_AGE_pos.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$moduleColor,b$Gene),])
+write.table(ab, file="20150622_hPVACGeneInfoAGE_PC1AGEpos_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+# need Vennerable package loaded
+library(Vennerable)
+
+# read in module classes comparing hPVAC pos to Ravits neg
+
+hPVAC.PC1.AGE.pos <- read.table("20150622_hPVACGeneInfoPC1_PC1AGEpos.txt", h=T, sep="\t")
+Ravits.PC1.neg <- read.table("20150622_RavitsGeneInfo_PC1neg.txt", h=T, sep="\t")
+x = as.vector(hPVAC.PC1.AGE.pos$GENE)
+y = as.vector(Ravits.PC1.neg$GENE)
+All = list(x,y)
+names(All) = c("hPVAC.PC1.AGE.pos", "Ravits.PC1.neg")
+intersect = Venn(All)
+plot(intersect, doWeights = T, doEuler = T)
+grid.text("20150622 hPVAC.PC1.AGE.pos Ravits.PC1.neg gene overlap", vp = viewport(x=0.5, y=0.979, w=unit(1, "npc"), h=unit(1, "npc")))
+
+### extract genes represented in both
+list = intersect@IntersectionSets$'11'
+write.table(list, file="20150622_genes_in_both_hPVACPC1AGEpos_RavitsPC1neg.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in iMN only
+list = intersect@IntersectionSets$'10'
+write.table(list, file="20150622_genes_in_only_hPVACPC1AGEpos.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in sALS only
+list = intersect@IntersectionSets$'01'
+write.table(list, file="20150622_genes_in_only_RavitsPC1neg.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+# read in module classes comparing hPVAC neg to Ravits pos
+
+hPVAC.PC1.AGE.neg <- read.table("20150622_hPVACGeneInfoPC1_PC1AGEneg.txt", h=T, sep="\t")
+Ravits.PC1.pos <- read.table("20150622_RavitsGeneInfo_PC1pos.txt", h=T, sep="\t")
+x = as.vector(hPVAC.PC1.AGE.neg$GENE)
+y = as.vector(Ravits.PC1.pos$GENE)
+All = list(x,y)
+names(All) = c("hPVAC.PC1.AGE.neg", "Ravits.PC1.pos")
+intersect = Venn(All)
+plot(intersect, doWeights = T, doEuler = T)
+grid.text("20150622 hPVAC.PC1.AGE.neg Ravits.PC1.pos gene overlap", vp = viewport(x=0.5, y=0.979, w=unit(1, "npc"), h=unit(1, "npc")))
+
+### extract genes represented in both
+list = intersect@IntersectionSets$'11'
+write.table(list, file="20150622_genes_in_both_hPVACPC1AGEneg_RavitsPC1pos.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in iMN only
+list = intersect@IntersectionSets$'10'
+write.table(list, file="20150622_genes_in_only_hPVACPC1AGEneg.txt", row.names=F, quote=F, sep="\t")
+
+### extract genes represented in sALS only
+list = intersect@IntersectionSets$'01'
+write.table(list, file="20150622_genes_in_only_RavitsPC1pos.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+### change directories to merge overlaps with gene infos
+
+### merge hPVACpos Ravitsneg overlap with geneInfos
+
+a=read.table("20150622_hPVACGeneInfoAGE_PC1AGEpos.txt", h=T, sep="\t")
+b=read.table("20150622_genes_in_both_hPVACPC1AGEpos_RavitsPC1neg.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$x),])
+write.table(ab, file="20150622_hPVACGeneInfoAGE_hPVACposRavitsnegoverlap_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_hPVACGeneInfoPC1_PC1AGEpos.txt", h=T, sep="\t")
+b=read.table("20150622_genes_in_both_hPVACPC1AGEpos_RavitsPC1neg.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$x),])
+write.table(ab, file="20150622_hPVACGeneInfoPC1_hPVACposRavitsnegoverlap_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_RavitsGeneInfo_PC1neg.txt", h=T, sep="\t")
+b=read.table("20150622_genes_in_both_hPVACPC1AGEpos_RavitsPC1neg.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$x),])
+write.table(ab, file="20150622_RavitsGeneInfoPC1_hPVACposRavitsnegoverlap_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+
+### merge hPVACneg Ravitspos overlap with geneInfos
+
+a=read.table("20150622_hPVACGeneInfoAGE_PC1AGEneg.txt", h=T, sep="\t")
+b=read.table("20150622_genes_in_both_hPVACPC1AGEneg_RavitsPC1pos.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$x),])
+write.table(ab, file="20150622_hPVACGeneInfoAGE_hPVACnegRavitsposoverlap_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_hPVACGeneInfoPC1_PC1AGEneg.txt", h=T, sep="\t")
+b=read.table("20150622_genes_in_both_hPVACPC1AGEneg_RavitsPC1pos.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$x),])
+write.table(ab, file="20150622_hPVACGeneInfoPC1_hPVACnegRavitsposoverlap_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20150622_RavitsGeneInfo_PC1pos.txt", h=T, sep="\t")
+b=read.table("20150622_genes_in_both_hPVACPC1AGEneg_RavitsPC1pos.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$x),])
+write.table(ab, file="20150622_RavitsGeneInfoPC1_hPVACnegRavitsposoverlap_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+
+### make box plots hPVACpos Ravitsneg (boxplots for gene significance)
+
+a=read.table("20150622_hPVAC_AGEpos_Ravits_PC1neg_box.txt", h=T, sep="\t")
+boxplot(a, las=2, main = "20150622 hPVACpos Ravitsneg GS boxplot")
+
+length(a$hPVAC_AGEpos_only)
+length(a$hPVAC_AGEpos_both)
+length(a$hPVAC_PC1pos_only)
+length(a$hPVAC_PC1pos_both)
+length(a$Ravits_PC1neg_both)
+length(a$Ravits_PC1neg_only)
+
+wilcox.test(a$hPVAC_AGEpos_only, a$hPVAC_AGEpos_both)
+# W = 124577, p-value = 5.45e-05
+
+wilcox.test(a$hPVAC_PC1pos_only, a$hPVAC_PC1pos_both)
+# W = 122012, p-value = 6.663e-06
+
+wilcox.test(a$Ravits_PC1neg_both, a$Ravits_PC1neg_only)
+# W = 70254, p-value < 2.2e-16
+
+
+
+### make box plots hPVACneg Ravitspos (boxplots for gene significance)
+
+a=read.table("20150622_hPVAC_AGEneg_Ravits_PC1pos_box.txt", h=T, sep="\t")
+boxplot(a, las=2, main = "20150622 hPVACneg Ravitspos GS boxplot")
+
+wilcox.test(a$hPVAC_AGEneg_only, a$hPVAC_AGEneg_both)
+# W = 120609, p-value = 4.238e-07
+
+wilcox.test(a$hPVAC_PC1neg_only, a$hPVAC_PC1neg_both)
+# W = 76034, p-value = 3.676e-05
+
+wilcox.test(a$Ravits_PC1pos_only, a$Ravits_PC1pos_both)
+# W = 40192, p-value = 0.1379
+
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+### 20150624 module properties
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_Ravitsneg_both327.txt", h=T, sep="\t")
+
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(a)) {
+  y = a[,i][a$moduleColor == colnames(a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_Ravitsneg_both327.txt", row.names=F, quote=F, sep="\t")
+
+
+#################### intermodule membership
+
+### create a list of inter-module membership values for only modules in rows
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_Ravitsneg_both327.txt", row.names=F, quote=F, sep="\t")
+
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_Ravitsneg_both327.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_Ravitsneg_only638.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_Ravitsneg_only638.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_Ravitsneg_only638.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_Ravitsneg_only638.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_Ravitspos_both145.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_Ravitspos_both145.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_Ravitspos_both145.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_Ravitspos_both145.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_Ravitspos_only513.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_Ravitspos_only513.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_Ravitspos_only513.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_Ravitspos_only513.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_hPVACneg_both145.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_hPVACneg_both145.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_hPVACneg_both145.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_hPVACneg_both145.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_hPVACneg_only1325.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_hPVACneg_only1325.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_hPVACneg_only1325.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_hPVACneg_only1325.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_hPVACpos_both327.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_hPVACpos_both327.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_hPVACpos_both327.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_hPVACpos_both327.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+### read in modified gene info tables filtered for rows containing modules of interest
+a=read.table("20150623_membership_hPVACpos_only897.txt", h=T, sep="\t")
+### create list of modules present in group
+group <- levels(a$moduleColor)
+b <- (a[, as.character(group)  ])
+nu.a <- data.frame(GENE = a$GENE, moduleColor = a$moduleColor, b)
+write.table(nu.a, file="20150624_reduced_hPVACpos_only897.txt", row.names=F, quote=F, sep="\t")
+### create a list of intra-module membership values for only modules in rows
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intramodule_hPVACpos_only897.txt", row.names=F, quote=F, sep="\t")
+### re-run for loop to create list of inter-module membership values
+x <- c()
+for(i in 3:length(nu.a)) {
+  y = nu.a[,i][!nu.a$moduleColor == colnames(nu.a)[i]]; x = c(x, y) 
+}
+write.table(x, file="20150624_intermodule_hPVACpos_only897.txt", row.names=F, quote=F, sep="\t")
+
+
+
+########################### intra-module membership
+
+
+### boxplot for intra-module membership
+a=read.table("20150624_intramodule_box.txt", h=T, sep="\t")
+dim(a)
+boxplot(a, las=2, main = "20150624 intra-module membership")
+
+wilcox.test(a[,1], a[,2])
+# W = 96955, p-value < 2.2e-16
+wilcox.test(a[,3], a[,4])
+# W = 64989, p-value < 2.2e-16
+wilcox.test(a[,5], a[,6])
+# W = 89164, p-value = 0.1552
+wilcox.test(a[,7], a[,8])
+# W = 33999, p-value = 0.1142
+
+
+
+
+### boxplot for inter-module membership
+a=read.table("20150624_intermodule_box.txt", h=T, sep="\t")
+dim(a)
+boxplot(a, las=2, main = "20150624 inter-module membership")
+
+wilcox.test(a[,1], a[,2])
+# W = 17191656, p-value < 2.2e-16
+wilcox.test(a[,3], a[,4])
+# W = 696834, p-value < 2.2e-16
+wilcox.test(a[,5], a[,6])
+# W = 7379705, p-value = 0.002184
+wilcox.test(a[,7], a[,8])
+# W = 1796100, p-value = 0.4815
+
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+### 20150625 hPVAC (iMN network maps in Figure 6f and 6h) cytoscape export with Ravits overlap (plotting cytoscape maps for iMN AGEposPC1pos or AGEnegPC1neg modules)
+
+library(WGCNA)
+getwd()
+options(stringsAsFactors = FALSE)
+
+### Relating modules to external information and identifying important genes
+# Load the expression and trait data saved in the first part
+lnames = load(file = "20150119_data_Input.RData");
+#The variable lnames contains the names of loaded variables.
+lnames
+# Load network data saved in the second part.
+lnames = load(file = "networkConstruction-auto.RData");
+lnames
+
+
+### after building cyt and pear below, save these as network data:
+save(MEs, moduleLabels, moduleColors, geneTree,
+     TOM, cyt, PEAR,
+     file = "20150625_cytoscape_network.RData")
+
+### to load networks, use the following command on future R sessions
+networknames = load(file = "20150625_cytoscape_network.RData");
+networknames
+
+
+### move supermodule names into folder, then plug in to work with PC1pos, PC1neg, etc.
+PC1pos.modules <- read.table("20150622_hPVAC_PC1_AGE_pos.txt", h=T, sep="\t")
+modules = PC1pos.modules[,1]
+
+# Select module probes
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = names(datExpr)[match(modProbes, names(datExpr))];
+
+# Select the corresponding Topological Overlap (PEAR)
+modPEAR = PEAR[inModule, inModule];
+dimnames(modPEAR) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cytPEAR = exportNetworkToCytoscape(modPEAR,
+                                   edgeFile = paste("20150625_PEAR_CytoscapeInput-edges-PC1AGEpos.txt", sep=""),
+                                   nodeFile = paste("20150625_PEAR_CytoscapeInput-nodes-PC1AGEpos.txt", sep=""),
+                                   weighted = TRUE,
+                                   threshold = -1.1,
+                                   nodeNames = modProbes,
+                                   altNodeNames = modGenes,
+                                   nodeAttr = moduleColors[inModule]);
+
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM,
+                               edgeFile = paste("20150625_TOM_CytoscapeInput-edges-PC1AGEpos.txt", sep=""),
+                               nodeFile = paste("20150625_TOM_CytoscapeInput-nodes-PC1AGEpos.txt", sep=""),
+                               weighted = TRUE,
+                               threshold = -0.1,
+                               nodeNames = modProbes,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule]);
+
+#### read back TOM edge file to merge with PEAR edge file
+a=read.table("20150625_TOM_CytoscapeInput-edges-PC1AGEpos.txt", h=T, sep=" ")
+b=read.table("20150625_PEAR_CytoscapeInput-edges-PC1AGEpos.txt", h=T, sep=" ")
+ab=cbind(a,b)
+
+# get a summary of the weight in ab
+summary(ab[,3])
+# 3rd Quartile of TOM edges is shown.  use this as cut off to get top 25% edges
+# get the 95th and 99th percentile of weights
+quantile(ab[,3], c(.95, .99))
+
+# get a summary of the pearson correlation in ab
+summary(ab[,9])
+# just double checking that the 3rd column is really indicating edge weight and not referencing the 9th column
+
+# load library for function ddply
+library(plyr)
+
+#use ab as "test" written previously on 20141010
+test = ab
+
+#create subset table that includes only fromNodes with weight > X (the 99th percentile, etc.)
+#filter for 99th percentile of weights
+testweightX = subset(test, weight > 0.1709081)
+
+### write table of fromNodes with weight > X
+# use this to calculate average strength of connectivity between H and ORTHO genes in PC1pos, etc.
+write.table(testweightX, file="20150625_PC1AGEpos99w.txt", row.names=F, quote=F, sep="\t")
+
+#create table that lists the fromNodes along with the length(toNode)
+testweightXlength = ddply(testweightX,.(fromNode),
+                          summarise,
+                          length = length(toNode))
+
+### write table of fromNodes with weight > X, and summarized number of connections
+# use this to calculate average number of connections for H and ORTHO genes in PC1pos, etc.
+write.table(testweightXlength, file="20150625_PC1AGEpos99wLength.txt", row.names=F, quote=F, sep="\t")
+
+#create subset table that includes only fromNodes with length > Y
+# this will be for cytoscape plotting purposes. it shrinks the list so that memory can handle it.
+# I chose 30 because that is the minimum number used for module classification
+testweightXlengthY = subset(testweightXlength, length > 30)
+
+#create list or fromNodes you want to keep
+keep = testweightXlengthY$fromNode
+
+#create subset table from the weight-filtered table, for fromNodes found in "keep"
+testfilt = subset(testweightX, fromNode %in% keep)
+
+#write table for filtered edge file.  open in excel, annotate each edge as "pos" or "neg" based on Pearson signage
+write.table(testfilt, file="20150625_PC1AGEpos99w30d.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+### use the following files for importing node table into cytoscape
+# 20150625_Ravits15614geneInfo_hPVAC10605geneInfo_merge.txt
+# 20150625_hPVAC10605geneInfo_Ravits15614geneInfo_merge.txt
+
+
+
+
+
+
+
+
+
+### move supermodule names into folder, then plug in to work with PC1pos, PC1neg, etc.
+PC1AGEneg.modules <- read.table("20150622_hPVAC_PC1_AGE_neg.txt", h=T, sep="\t")
+modules = PC1AGEneg.modules[,1]
+
+# Select module probes
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = names(datExpr)[match(modProbes, names(datExpr))];
+
+# Select the corresponding Topological Overlap (PEAR)
+modPEAR = PEAR[inModule, inModule];
+dimnames(modPEAR) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cytPEAR = exportNetworkToCytoscape(modPEAR,
+                                   edgeFile = paste("20150625_PEAR_CytoscapeInput-edges-PC1AGEneg.txt", sep=""),
+                                   nodeFile = paste("20150625_PEAR_CytoscapeInput-nodes-PC1AGEneg.txt", sep=""),
+                                   weighted = TRUE,
+                                   threshold = -1.1,
+                                   nodeNames = modProbes,
+                                   altNodeNames = modGenes,
+                                   nodeAttr = moduleColors[inModule]);
+
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM,
+                               edgeFile = paste("20150625_TOM_CytoscapeInput-edges-PC1AGEneg.txt", sep=""),
+                               nodeFile = paste("20150625_TOM_CytoscapeInput-nodes-PC1AGEneg.txt", sep=""),
+                               weighted = TRUE,
+                               threshold = -0.1,
+                               nodeNames = modProbes,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule]);
+
+#### read back TOM edge file to merge with PEAR edge file
+a=read.table("20150625_TOM_CytoscapeInput-edges-PC1AGEneg.txt", h=T, sep=" ")
+b=read.table("20150625_PEAR_CytoscapeInput-edges-PC1AGEneg.txt", h=T, sep=" ")
+ab=cbind(a,b)
+# get a summary of the weight in ab
+summary(ab[,3])
+# 3rd Quartile of TOM edges is shown.  use this as cut off to get top 25% edges
+# get the 95th and 99th percentile of weights
+quantile(ab[,3], c(.95, .99))
+# get a summary of the pearson correlation in ab
+summary(ab[,9])
+# just double checking that the 3rd column is really indicating edge weight and not referencing the 9th column
+
+# load library for function ddply
+library(plyr)
+#use ab as "test" written previously on 20141010
+test = ab
+#create subset table that includes only fromNodes with weight > X (the 99th percentile, etc.)
+#filter for 99th percentile of weights
+testweightX = subset(test, weight > 0.15788761)
+### write table of fromNodes with weight > X
+# use this to calculate average strength of connectivity between H and ORTHO genes in PC1pos, etc.
+write.table(testweightX, file="20150625_PC1AGEneg99w.txt", row.names=F, quote=F, sep="\t")
+#create table that lists the fromNodes along with the length(toNode)
+testweightXlength = ddply(testweightX,.(fromNode),
+                          summarise,
+                          length = length(toNode))
+### write table of fromNodes with weight > X, and summarized number of connections
+# use this to calculate average number of connections for H and ORTHO genes in PC1pos, etc.
+write.table(testweightXlength, file="20150625_PC1AGEneg99wLength.txt", row.names=F, quote=F, sep="\t")
+#create subset table that includes only fromNodes with length > Y
+# this will be for cytoscape plotting purposes. it shrinks the list so that memory can handle it.
+# I chose 30 because that is the minimum number used for module classification
+testweightXlengthY = subset(testweightXlength, length > 30)
+#create list or fromNodes you want to keep
+keep = testweightXlengthY$fromNode
+#create subset table from the weight-filtered table, for fromNodes found in "keep"
+testfilt = subset(testweightX, fromNode %in% keep)
+#write table for filtered edge file.  open in excel, annotate each edge as "pos" or "neg" based on Pearson signage
+write.table(testfilt, file="20150625_PC1AGEneg99w30d.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+### 20150625 human Ravits (sALS network maps in Figure 6g and 6i) cytoscape export (cytoscape maps for sALSpos and sALSneg modules)
+
+library(WGCNA)
+getwd()
+options(stringsAsFactors = FALSE)
+
+### Relating modules to external information and identifying important genes
+# Load the expression and trait data saved in the first part
+lnames = load(file = "20150615_data_Input.RData");
+#The variable lnames contains the names of loaded variables.
+lnames
+# Load network data saved in the second part.
+lnames = load(file = "networkConstruction-auto.RData");
+lnames
+
+
+### after building cyt and pear below, save these as network data:
+save(MEs, moduleLabels, moduleColors, geneTree,
+     TOM, cyt, PEAR,
+     file = "20150625_cytoscape_network.RData")
+
+### to load networks, use the following command on future R sessions
+networknames = load(file = "20150625_cytoscape_network.RData");
+networknames
+
+
+
+###  Exporting a gene network to external visualization software
+### Exporting to Cytoscape
+# Recalculate topological overlap if needed
+# 20150121 today I set networkType = "signed" and TOMtype = "signed"
+# from 20141015, I used the default setting for calcultaing TOM:
+# networkType = unsigned and TOMtype = signed should be the default, but just be explicit
+TOM = TOMsimilarityFromExpr(datExpr, power = 21, networkType = "signed", TOMType = "signed");
+
+### create a separate Pearson matrix to keep track of correlation and anti-correlation 
+PEAR = cor(datExpr, use = "pairwise.complete.obs", method = "pearson")
+
+
+
+### 20150329 move supermodule names into folder, then plug in to work with PC1pos, PC1neg, etc.
+PC1neg.modules <- read.table("20150622_Ravits_PC1_neg.txt", h=T, sep="\t")
+modules = PC1neg.modules[,1]
+
+# Select module probes
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = names(datExpr)[match(modProbes, names(datExpr))];
+
+# Select the corresponding Topological Overlap (PEAR)
+modPEAR = PEAR[inModule, inModule];
+dimnames(modPEAR) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cytPEAR = exportNetworkToCytoscape(modPEAR,
+                                   edgeFile = paste("20150625_PEAR_CytoscapeInput-edges-PC1neg.txt", sep=""),
+                                   nodeFile = paste("20150625_PEAR_CytoscapeInput-nodes-PC1neg.txt", sep=""),
+                                   weighted = TRUE,
+                                   threshold = -1.1,
+                                   nodeNames = modProbes,
+                                   altNodeNames = modGenes,
+                                   nodeAttr = moduleColors[inModule]);
+
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM,
+                               edgeFile = paste("20150625_TOM_CytoscapeInput-edges-PC1neg.txt", sep=""),
+                               nodeFile = paste("20150625_TOM_CytoscapeInput-nodes-PC1neg.txt", sep=""),
+                               weighted = TRUE,
+                               threshold = -0.1,
+                               nodeNames = modProbes,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule]);
+
+#### read back TOM edge file to merge with PEAR edge file
+a=read.table("20150625_TOM_CytoscapeInput-edges-PC1neg.txt", h=T, sep=" ")
+b=read.table("20150625_PEAR_CytoscapeInput-edges-PC1neg.txt", h=T, sep=" ")
+ab=cbind(a,b)
+# get a summary of the weight in ab
+summary(ab[,3])
+# 3rd Quartile of TOM edges is shown.  use this as cut off to get top 25% edges
+# get the 95th and 99th percentile of weights
+quantile(ab[,3], c(.95, .99))
+# get a summary of the pearson correlation in ab
+summary(ab[,9])
+# just double checking that the 3rd column is really indicating edge weight and not referencing the 9th column
+# load library for function ddply
+library(plyr)
+#use ab as "test" written previously on 20141010
+test = ab
+#create subset table that includes only fromNodes with weight > X (the 99th percentile, etc.)
+#filter for 99th percentile of weights
+testweightX = subset(test, weight > 0.2134587)
+### write table of fromNodes with weight > X
+# use this to calculate average strength of connectivity between H and ORTHO genes in PC1pos, etc.
+write.table(testweightX, file="20150625_PC1neg99w.txt", row.names=F, quote=F, sep="\t")
+#create table that lists the fromNodes along with the length(toNode)
+testweightXlength = ddply(testweightX,.(fromNode),
+                          summarise,
+                          length = length(toNode))
+### write table of fromNodes with weight > X, and summarized number of connections
+# use this to calculate average number of connections for H and ORTHO genes in PC1pos, etc.
+write.table(testweightXlength, file="20150625_PC1neg99wLength.txt", row.names=F, quote=F, sep="\t")
+#create subset table that includes only fromNodes with length > Y
+# this will be for cytoscape plotting purposes. it shrinks the list so that memory can handle it.
+# I chose 30 because that is the minimum number used for module classification
+testweightXlengthY = subset(testweightXlength, length > 30)
+#create list or fromNodes you want to keep
+keep = testweightXlengthY$fromNode
+#create subset table from the weight-filtered table, for fromNodes found in "keep"
+testfilt = subset(testweightX, fromNode %in% keep)
+#write table for filtered edge file.  open in excel, annotate each edge as "pos" or "neg" based on Pearson signage
+write.table(testfilt, file="20150625_PC1neg99w30d.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+### merge Ravits PC1 geneInfo with hPVAC AGE geneInfo
+a=read.table("20150622_Ravits15614_geneInfoPC1.txt", h=T, sep="\t")
+b=read.table("20150622_hPVAC10605_geneInfoAGE.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$GENE),])
+write.table(ab, file="20150625_Ravits15614geneInfo_hPVAC10605geneInfo_merge.txt", row.names=F, quote=F, sep="\t")
+
+### merge hPVAC AGE geneInfo with Ravits PC1 geneInfo
+a=read.table("20150622_hPVAC10605_geneInfoAGE.txt", h=T, sep="\t")
+b=read.table("20150622_Ravits15614_geneInfoPC1.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$GENE),])
+write.table(ab, file="20150625_hPVAC10605geneInfo_Ravits15614geneInfo_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+
+
+
+### move supermodule names into folder, then plug in to work with PC1pos, PC1neg, etc.
+PC1pos.modules <- read.table("20150622_Ravits_PC1_pos.txt", h=T, sep="\t")
+modules = PC1neg.modules[,1]
+
+# Select module probes
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = names(datExpr)[match(modProbes, names(datExpr))];
+
+# Select the corresponding Topological Overlap (PEAR)
+modPEAR = PEAR[inModule, inModule];
+dimnames(modPEAR) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cytPEAR = exportNetworkToCytoscape(modPEAR,
+                                   edgeFile = paste("20150625_PEAR_CytoscapeInput-edges-PC1pos.txt", sep=""),
+                                   nodeFile = paste("20150625_PEAR_CytoscapeInput-nodes-PC1pos.txt", sep=""),
+                                   weighted = TRUE,
+                                   threshold = -1.1,
+                                   nodeNames = modProbes,
+                                   altNodeNames = modGenes,
+                                   nodeAttr = moduleColors[inModule]);
+
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM,
+                               edgeFile = paste("20150625_TOM_CytoscapeInput-edges-PC1pos.txt", sep=""),
+                               nodeFile = paste("20150625_TOM_CytoscapeInput-nodes-PC1pos.txt", sep=""),
+                               weighted = TRUE,
+                               threshold = -0.1,
+                               nodeNames = modProbes,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule]);
+
+#### read back TOM edge file to merge with PEAR edge file
+a=read.table("20150625_TOM_CytoscapeInput-edges-PC1pos.txt", h=T, sep=" ")
+b=read.table("20150625_PEAR_CytoscapeInput-edges-PC1pos.txt", h=T, sep=" ")
+ab=cbind(a,b)
+# get a summary of the weight in ab
+summary(ab[,3])
+# 3rd Quartile of TOM edges is shown.  use this as cut off to get top 25% edges
+# get the 95th and 99th percentile of weights
+quantile(ab[,3], c(.95, .99))
+# get a summary of the pearson correlation in ab
+summary(ab[,9])
+# just double checking that the 3rd column is really indicating edge weight and not referencing the 9th column
+
+# load library for function ddply
+library(plyr)
+#use ab as "test" written previously on 20141010
+test = ab
+#create subset table that includes only fromNodes with weight > X (the 99th percentile, etc.)
+#filter for 99th percentile of weights
+testweightX = subset(test, weight > 0.1612701)
+### write table of fromNodes with weight > X
+# use this to calculate average strength of connectivity between H and ORTHO genes in PC1pos, etc.
+write.table(testweightX, file="20150625_PC1pos99w.txt", row.names=F, quote=F, sep="\t")
+#create table that lists the fromNodes along with the length(toNode)
+testweightXlength = ddply(testweightX,.(fromNode),
+                          summarise,
+                          length = length(toNode))
+### write table of fromNodes with weight > X, and summarized number of connections
+# use this to calculate average number of connections for H and ORTHO genes in PC1pos, etc.
+write.table(testweightXlength, file="20150625_PC1pos99wLength.txt", row.names=F, quote=F, sep="\t")
+#create subset table that includes only fromNodes with length > Y
+# this will be for cytoscape plotting purposes. it shrinks the list so that memory can handle it.
+# I chose 30 because that is the minimum number used for module classification
+testweightXlengthY = subset(testweightXlength, length > 30)
+#create list or fromNodes you want to keep
+keep = testweightXlengthY$fromNode
+#create subset table from the weight-filtered table, for fromNodes found in "keep"
+testfilt = subset(testweightX, fromNode %in% keep)
+#write table for filtered edge file.  open in excel, annotate each edge as "pos" or "neg" based on Pearson signage
+write.table(testfilt, file="20150625_PC1pos99w30d.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+
+
+### 20150917 validation set ii (Figure 3, combining multiple arrays)
+
+
+### quanitile normalize all expression values in combined array expression matrix
+library(affy)
+library(preprocessCore)
+
+### original way of NQ
+dim(a)
+# in case table is in log2 values:
+m= 2^a[,2:121]
+c=normalize.quantiles(m)
+e=log2(c)
+### add quantile normalized density to un-normalized density plots
+for(i in 1:ncol(e))
+  if(i==2) lines(density(e[,i]),
+                 col="black") else lines(density(e[,i]), col="black")
+
+### or plot quantile normalized density on its own
+for(i in 1:ncol(e))
+  if(i==2) plot(density(e[,i]),
+                col=1,
+                xlim=c(-4,17),
+                ylim=c(0,0.6),
+                main="20150911 all gmax NQL") else lines(density(e[,i]), col=1)
+
+
+df=data.frame(e)
+write.table(df, file="20150917_NQL.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+### xy plot all samples and all genes for validation set
+
+x <- read.table("20150917_NQL_PCAcoord25_o.txt", h=T, sep="\t")
+
+xcolor = x$COLOR
+palette(as.character(xcolor))
+par(mar = c(12,12,12,12))
+par(mar = c(13,13,13,13))
+par(mar = c(14,14,14,14))
+par(mar = c(15,15,15,15))
+plot(x$PC7, x$PC1, xlab = "PC7", ylab = "PC1", col = palette(), pch = x$PCH,
+     xlim = c(min(x$PC7)-5, max(x$PC7)+5),
+     ylim = c(min(x$PC1)-5, max(x$PC1)+5),
+     main = "20150919 all samples all genes NQL PCA", asp = 1)
+
+
+
+### merge NQL with 20 gene list
+
+a=read.table("20150915_20genelist.txt", h=T, sep="\t")
+b=read.table("20150917_NQL.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$GENE,b$GENE),])
+write.table(ab, file="20150919_20genelist_NQL_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+### xy plot all samples and 20 genes
+
+x <- read.table("20150919_20genelist_NQL_PCAcoord_o.txt", h=T, sep="\t")
+
+xcolor = x$COLOR
+palette(as.character(xcolor))
+par(mar = c(10,10,10,10))
+par(mar = c(13,13,13,13))
+plot(x$PC2, x$PC1, xlab = "PC2", ylab = "PC1", col = palette(), pch = x$PCH,
+     xlim = c(min(x$PC2)-.5, max(x$PC2)+.5),
+     ylim = c(min(x$PC1)-.5, max(x$PC1)+.5),
+     main = "20150919 all samples 20 genes NQL PCA", asp = 1)
+
+
+
+
+### Pearson correlation against hPVAC medians
+
+# correlate Pearson
+a=read.table("20150917_NQL_median.txt",sep="\t",h=T)
+dim(a)
+b=cor(a[,2:125],use="pairwise.complete.obs",method="pearson")
+write.table(b,file="20150919_hPVACmedian_Pearsons.txt",sep="\t")
+
+
+
+### ROC
+
+library(ROCR)
+
+### ROC for VALIDATION combined PSC, FETAL, SPMN... REMOVE hPVAC
+
+x <- read.table("20160220_preds_only_validation.txt", h=T, sep="\t")
+
+pred <- prediction(c(x$PSC_MED, x$FETAL_MED, x$SPMN_MED),
+                   c(x$PSC_LABEL, x$FETAL_LABEL, x$SPMN_LABEL))
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main = "20160220 ROC for VALID combined predictions remove hPVAC", col = "red", lwd = 3)
+#abline(a=0, b= 1)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.6848268
+
+pred <- prediction(c(x$X6640_PC1reverse, x$X6640_PC7, x$X6640_PC1),
+                   c(x$PSC_LABEL, x$FETAL_LABEL, x$SPMN_LABEL))
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "black", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.8827957
+
+pred <- prediction(c(x$X20_PC1reverse, x$X20_PC2, x$X20_PC1),
+                   c(x$PSC_LABEL, x$FETAL_LABEL, x$SPMN_LABEL))
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "blue", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9103943
+
+pred <- prediction(c(x$PSC_MED_20, x$FETAL_MED_20, x$SPMN_MED_20),
+                   c(x$PSC_LABEL, x$FETAL_LABEL, x$SPMN_LABEL))
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "green", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9427718
+
+
+
+### ROC for VALIDATION PSC... REMOVE hPVAC (iMN data set expression values)
+
+x <- read.table("20160220_preds_only_validation.txt", h=T, sep="\t")
+
+pred <- prediction(x$PSC_MED, x$PSC_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main = "20160220 ROC for VALID PSC predictions remove hPVAC", col = "red", lwd = 3)
+#abline(a=0, b= 1)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 1
+
+pred <- prediction(x$X6640_PC1reverse, x$PSC_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "black", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.7981221
+
+pred <- prediction(x$X20_PC1reverse, x$PSC_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "blue", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 1
+
+pred <- prediction(x$PSC_MED_20, x$PSC_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "green", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9929577
+
+
+
+
+
+
+### ROC for VALIDATION FETAL... REMOVE hPVAC (iMN data set expression values)
+
+x <- read.table("20160220_preds_only_validation.txt", h=T, sep="\t")
+
+pred <- prediction(x$FETAL_MED, x$FETAL_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main = "20160220 ROC for VALID FETAL predictions remove hPVAC", col = "red", lwd = 3)
+#abline(a=0, b= 1)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.5892473
+
+pred <- prediction(x$X6640_PC7, x$FETAL_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "black", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.8236559
+
+pred <- prediction(x$X20_PC2, x$FETAL_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "blue", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9806452
+
+pred <- prediction(x$FETAL_MED_20, x$FETAL_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "green", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9860215
+
+
+
+
+### ROC for VALIDATION SPMN... REMOVE hPVAC (iMN data set expression values)
+
+x <- read.table("20160220_preds_only_validation.txt", h=T, sep="\t")
+
+pred <- prediction(x$SPMN_MED, x$SPMN_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, main = "20160220 ROC for VALID SPMN predictions remove hPVAC", col = "red", lwd = 3)
+#abline(a=0, b= 1)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9048742
+
+pred <- prediction(x$X6640_PC1, x$SPMN_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "black", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 0.9968553
+
+pred <- prediction(x$X20_PC1, x$SPMN_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "blue", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 1
+
+pred <- prediction(x$SPMN_MED_20, x$SPMN_LABEL)
+perf <- performance(pred,"tpr","fpr")
+plot(perf, col = "green", lwd = 3, add = T)
+perf <- performance(pred,"tpr","fpr", measure = "auc")
+### return AUC
+perf@y.values
+# 1
+
+
+
+
+######################################################################################
+
+
+
+
+
+### 20151121 RH hyper with ClinVar
+
+
+# need Vennerable package loaded
+library(Vennerable)
+
+getwd()
+
+### filter Disease groups for genes detectable on HGU133a2
+a=read.table("20151121_Disease_groups.txt", h=T, sep="\t")
+b=read.table("HGU133a2_unique_genes.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$hGENE,b$Gene),])
+write.table(ab, file="20151121_disease_U133a2_merge.txt", row.names=F, quote=F, sep="\t")
+
+### create 20151121_disease_on_U133a2.txt
+### sort on "order", remove NA rows, keep first two columns: Disease and hGene 
+
+
+# read in filtered gene info tables appropriate for hypergeo testing
+Disease.U133a2 <- read.table("20151121_disease_on_U133a2.txt", h=T, sep="\t")
+draw.module <- read.table("20150327_human_geneInfo.txt", h=T, sep="\t")
+
+# collapse human module colors into table with name and size of each module
+class(Disease.U133a2$Disease)
+human.disease.length <- aggregate(. ~ Disease, data = Disease.U133a2, length)
+write.table(human.disease.length, file="20151121_human_disease_length.txt", row.names=F, quote=F, sep="\t")
+
+# collapse human module colors into table with name and size of each module
+class(draw.module$moduleColor)
+draw.mod.length <- aggregate(. ~ moduleColor, data = draw.module, length)
+write.table(draw.mod.length, file="20151121_draw_module_length.txt", row.names=F, quote=F, sep="\t")
+
+# check dimensions
+dim(human.disease.length)
+dim(draw.mod.length)
+
+### hypergeometric test for CliVar enrichment
+RH.hyper <- function(x,y) {
+  All = list(x,y)
+  intersect = Venn(All)
+  list = intersect@IntersectionSets$'11'
+  length.list = length(list)
+  dhyper(length.list, length(x), 22608-length(x), length(y))
+}
+
+
+for(j in 1:length(human.disease.length[,1])) {
+  x = as.vector(Disease.U133a2$hGENE[ Disease.U133a2$Disease == human.disease.length[j,1]])
+  for(i in 1:length(draw.mod.length[,1])) {
+    y = as.vector(draw.module$geneSymbol[ draw.module$moduleColor == draw.mod.length[i,1]])
+    z = RH.hyper(x,y)
+    draw.mod.length[i,j+2] = z
+  }
+}
+
+
+
+write.table(draw.mod.length, file="20151121_RH_hyper_modules_disease.txt", row.names=F, quote=F, sep="\t")
+
+### remove grey module row, rename with "nogrey" appended to file name
+
+### Benjamini Hochberg adjust P-values
+RH.Pvals <-read.table("20151121_RH_hyper_modules_disease_nogrey.txt", h=T, sep="\t")
+RH.adj.Pval <- RH.Pvals
+
+dim(RH.adj.Pval)
+
+for(j in 3:length(RH.Pvals)) {
+  p = RH.Pvals[,j]
+  z = p.adjust(p, method = "BH", n = length(p))
+  RH.adj.Pval[,j+10] = z
+}
+
+write.table(RH.adj.Pval, file="20151121_RH_hyper_modules_disease_Padj.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+######################################################################################
+
+
+
+
+
+# 20160303 linear models with sALS data set
+
+
+##################### create table of F-ratios and p-values
+
+
+df1 <- read.table(file = "20160303_RavitsGmaxNQL_PCAcoord_traits.txt", h = T, sep = "\t")
+summary(df1)
+df1$PMI <- as.numeric(df1$PMI)
+
+
+
+
+summary(df1)
+dim(df1)
+d <- data.frame()
+
+# make F-statisitcs table
+RH.Fstat <- function(x,y) {
+  lm1 = lm(x ~ y)
+  summary(lm1)$fstatistic[1]
+}
+
+for(j in 8:length(df1)) {
+  for(i in 2:7) {
+    z = RH.Fstat(df1[,j] , df1[,i])
+    d[i-1, j-7] = z
+  }
+}
+
+write.table(d, file="20160303_RH_Fstat.txt", row.names=F, quote=F, sep="\t")
+
+
+
+# make p-values table
+
+summary(df1)
+dim(df1)
+d <- data.frame()
+
+RH.FPval <- function(x,y) {
+  lm1 = lm(x ~ y)
+  pf(summary(lm1)$fstatistic[1],
+     summary(lm1)$fstatistic[2],
+     summary(lm1)$fstatistic[3],
+     lower.tail = FALSE)
+}
+
+for(j in 8:length(df1)) {
+  for(i in 2:7) {
+    z = RH.FPval(df1[,j] , df1[,i])
+    d[i-1, j-7] = z
+  }
+}
+
+write.table(d, file="20160303_RH_Pval.txt", row.names=F, quote=F, sep="\t")
+
+
+
+
+
+
+### 20160303 check residuals on significant comparisons
+
+library(car)
+# for durbinWatsonTest()
+
+# LM with untransformed PC1 and PHENO
+lm1 <- lm(PC1 ~ PHENO, data = df1)
+summary(lm1)
+stres <- ((lm1$residuals - mean(lm1$residuals))/ sd(lm1$residuals))
+par(mfrow = c(1, 1))
+qqnorm(stres); qqline(stres) #normality
+plot (stres~lm1$fitted.values) #hetero vs homo scedasticity
+plot(stres) 
+# test for autocorrelations
+durbinWatsonTest(lm1)
+# p-value 0.416
+# A significantly small p-value casts doubt on the validity of the null hypothesis and indicates correlation among residuals.
+shapiro.test(stres)
+# W = 0.9002, p-value = 0.03005; not likely normal
+
+
+# LM with transformed PC1 and PHENO
+lm1 <- lm(tPC1 ~ PHENO, data = df1)
+summary(lm1)
+stres <- ((lm1$residuals - mean(lm1$residuals))/ sd(lm1$residuals))
+par(mfrow = c(1, 1))
+qqnorm(stres); qqline(stres) #normality
+plot (stres~lm1$fitted.values) #hetero vs homo scedasticity
+plot(stres) 
+# test for autocorrelations
+durbinWatsonTest(lm1)
+# p-value 0.256
+# A significantly small p-value casts doubt on the validity of the null hypothesis and indicates correlation among residuals.
+shapiro.test(stres)
+# W = 0.9808, p-value = 0.9279; likely normal
+
+
+
+######################################################################
+
+
+# 20160217 module preservation iMN and sALS
+
+### adapted from WGCNA tutorial: https://labs.genetics.ucla.edu/horvath/CoexpressionNetwork/ModulePreservation/Tutorials/
+
+### merge iMN with sALS expression sets and moduleColor assignments
+a=read.table("20160217_iMN.txt", h=T, sep="\t")
+b=read.table("20160217_sALS_andCOLOR.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$Gene,b$Gene),])
+write.table(ab, file="20160217_iMN_sALS_merge.txt", row.names=F, quote=F, sep="\t")
+
+
+# Load the package
+library(WGCNA);
+# The following setting is important, do not omit.
+options(stringsAsFactors = FALSE);
+
+dat1 = read.table("20160217_iMN_sALS.txt", h=T, sep="\t")
+
+dim(dat1)
+names(dat1);
+# assign rows to either iMN or sALS data sets
+datExpr = data.frame(t(dat1[ ,2:66]))
+index.iMN=c(1:40)
+index.sALS=c(42:63)
+
+# Number of data sets that we work with
+nSets = 2;
+# Object that will contain the expression data
+multiExpr = list();
+multiExpr[[1]] = list(data = datExpr[index.iMN, ]);
+multiExpr[[2]] = list(data = datExpr[index.sALS, ]);
+# Names for the two sets
+setLabels = c("iMN", "sALS");
+# Important: components of multiExpr must carry identificating names
+names(multiExpr) = setLabels
+# Display the dimensions of the expression data (if you are confused by this construct, ignore it):
+lapply(multiExpr, lapply, dim)
+
+
+### merge iMN_moduleColor with sALS to find the iMN module color of genes represented in sALS set
+a=read.table("20160217_iMN_sALS.txt", h=T, sep="\t")
+b=read.table("20160217_iMN_moduleColor.txt", h=T, sep="\t")
+ab=cbind(a,b[match(a$Gene,b$GENE),])
+write.table(ab, file="20160217_iMN_sALS_iMNmoduleColor_merge.txt", row.names=F, quote=F, sep="\t")
+
+a=read.table("20160217_iMN_moduleColor_overlap.txt", h=T, sep="\t")
+color.iMN = a$ModuleColor
+
+color.sALS = dat1$sALS_ModuleColor
+
+### make sure that the iMN and sALS expression values within multiExpr object are numeric
+### this did not work when creating multiExpr list above.
+### I ensured that the iMN and sALS data were numeric by creating data.frame objects from dat1
+
+iMN.df = data.frame(t(dat1[,2:41]))
+colnames(iMN.df) = dat1$Gene
+
+sALS.df = data.frame(t(dat1[,43:64]))
+colnames(sALS.df) = dat1$Gene
+
+### Then I created multiExpr2
+# Object that will contain the expression data
+multiExpr2 = list();
+multiExpr2[[1]] = list(data = iMN.df);
+multiExpr2[[2]] = list(data = sALS.df);
+
+names(multiExpr2) = setLabels
+# Display the dimensions of the expression data (if you are confused by this construct, ignore it):
+lapply(multiExpr, lapply, dim)
+lapply(multiExpr2, lapply, dim)
+
+
+
+system.time( {
+  mp = modulePreservation(multiExpr2, colorList,
+                          referenceNetworks = c(1:2),
+                          loadPermutedStatistics = FALSE,
+                          nPermutations = 200,
+                          verbose = 3)
+} );
+
+save(mp, file = "20160217_iMN_sALS_module_preservation.RData");
+
+x = load("20160217_iMN_sALS_module_preservation.RData")
+
+
+
+### export Z-summary and median rank values.
+
+
+load(file = "20160217_iMN_sALS_module_preservation.RData")
+ref = 1 # Select the iMN data as reference
+test = 2 # Select the sALS data as test
+statsObs = cbind(mp$quality$observed[[ref]][[test]][, -1], mp$preservation$observed[[ref]][[test]][, -1])
+statsZ = cbind(mp$quality$Z[[ref]][[test]][, -1], mp$preservation$Z[[ref]][[test]][, -1]);
+
+# text file containing medianRANK.pres
+write.table(statsObs, file="20160217_statsObs_iMN_sALS.txt", row.names=T, quote=F, sep="\t")
+# text file containing Zsummary.pres
+write.table(statsZ, file="20160217_statsZ_iMN_sALS.txt", row.names=T, quote=F, sep="\t")
+
+# view the Z summary preservation
+print(signif(statsZ[, "Zsummary.pres", drop = FALSE],2));
+# Compare preservation to quality:
+print(signif(statsZ[, c("Zsummary.pres", "Zsummary.qual")], 2))
+
+
+
+# obtaining preservation scores when setting sALS as the reference data set and iMNs as the test data set
+ref = 2 # Select the sALS data as reference
+test = 1 # Select the iMN data as test
+statsObs = cbind(mp$quality$observed[[ref]][[test]][, -1], mp$preservation$observed[[ref]][[test]][, -1])
+statsZ = cbind(mp$quality$Z[[ref]][[test]][, -1], mp$preservation$Z[[ref]][[test]][, -1]);
+
+# text file containing medianRANK.pres
+write.table(statsObs, file="20160217_statsObs_sALS_iMN.txt", row.names=T, quote=F, sep="\t")
+# text file containing Zsummary.pres
+write.table(statsZ, file="20160217_statsZ_sALS_iMN.txt", row.names=T, quote=F, sep="\t")
+
+# view the Z summary preservation
+print(signif(statsZ[, "Zsummary.pres", drop = FALSE],2));
+# Compare preservation to quality:
+print(signif(statsZ[, c("Zsummary.pres", "Zsummary.qual")], 2))
+
