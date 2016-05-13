@@ -1,3 +1,17 @@
+#!/bin/env Rscript
+##
+# Copyright 2016 Cedars-Sinai Medical Center
+#
+# Licensed under the enclosed Terms and Conditions for Use, Reproduction and Distribution of Open Source Software (the "License”);
+# you may not use this file except in compliance with the License.
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+#limitations under the License.
+##
+
 ### 20160506 custom R scripts Ho et al
 
 
